@@ -1,0 +1,89 @@
+cmake_minimum_required(VERSION 3.20)
+project(MatteRefineOFX LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 14)  # OFX 1.4 Support uses throw() specs and auto_ptr
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release)
+endif()
+
+# Release version (0.1.0 = Fill Holes). Also the OFX plugin version (major.minor) and the
+# release package name.
+set(MR_VERSION "0.1.0")
+string(REPLACE "." ";" MR_VERSION_PARTS "${MR_VERSION}")
+list(GET MR_VERSION_PARTS 0 MR_VERSION_MAJOR)
+list(GET MR_VERSION_PARTS 1 MR_VERSION_MINOR)
+# Build identity for the version label and the log. -DMR_GIT=<hash> overrides it
+# (scripts/build_remote.sh builds from a copy without .git).
+if(NOT MR_GIT)
+  execute_process(COMMAND git -C ${CMAKE_SOURCE_DIR} rev-parse --short HEAD
+    OUTPUT_VARIABLE MR_GIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+endif()
+if(NOT MR_GIT)
+  set(MR_GIT "nogit")
+endif()
+set(OFX_DIR ${CMAKE_SOURCE_DIR}/third_party/openfx)
+set(BUNDLE_NAME MatteRefine)
+set(BUNDLE_DIR ${CMAKE_BINARY_DIR}/${BUNDLE_NAME}.ofx.bundle)
+find_package(Threads REQUIRED)
+
+# OpenFX 1.4 Support library (vendored, BSD). It still uses std::auto_ptr.
+add_library(ofx_support STATIC
+  ${OFX_DIR}/Support/Library/ofxsCore.cpp
+  ${OFX_DIR}/Support/Library/ofxsImageEffect.cpp
+  ${OFX_DIR}/Support/Library/ofxsInteract.cpp
+  ${OFX_DIR}/Support/Library/ofxsLog.cpp
+  ${OFX_DIR}/Support/Library/ofxsMultiThread.cpp
+  ${OFX_DIR}/Support/Library/ofxsParams.cpp
+  ${OFX_DIR}/Support/Library/ofxsProperty.cpp
+  ${OFX_DIR}/Support/Library/ofxsPropertyValidation.cpp)
+target_include_directories(ofx_support PUBLIC ${OFX_DIR}/include ${OFX_DIR}/Support/include)
+target_compile_options(ofx_support PRIVATE -w -fvisibility=hidden)
+
+# OS-specific sources behind ofx/src/platform.h and the bundle's binary folder. macOS:
+# decision 13, next.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  set(MR_PLATFORM_SOURCES ofx/src/platform_linux.cpp)
+  set(MR_ARCH_DIR Linux-x86-64)
+else()
+  message(FATAL_ERROR "No platform layer for ${CMAKE_SYSTEM_NAME} yet (ofx/src/platform.h)")
+endif()
+
+# The operations: pure logic, shared with the unit tests (decision 3).
+add_library(mr_ops STATIC ofx/src/ops/fill_holes.cpp)
+target_include_directories(mr_ops PUBLIC ofx/src)
+target_compile_options(mr_ops PRIVATE -Wall -Wextra -fvisibility=hidden)
+target_link_libraries(mr_ops PUBLIC Threads::Threads)
+
+add_library(${BUNDLE_NAME} MODULE
+  ofx/src/plugin.cpp
+  ofx/src/log.cpp
+  ofx/src/user_config.cpp
+  ofx/src/process.cpp
+  ofx/src/env_info.cpp
+  ${MR_PLATFORM_SOURCES})
+target_link_libraries(${BUNDLE_NAME} PRIVATE ofx_support mr_ops)
+target_compile_definitions(${BUNDLE_NAME} PRIVATE MR_VERSION="${MR_VERSION}" MR_GIT="${MR_GIT}"
+  MR_VERSION_MAJOR=${MR_VERSION_MAJOR} MR_VERSION_MINOR=${MR_VERSION_MINOR})
+target_compile_options(${BUNDLE_NAME} PRIVATE -Wall -Wextra -Wno-deprecated-declarations -Wno-deprecated
+  -fvisibility=hidden)
+# Export only the two OFX entry points. libstdc++ is linked dynamically: Flame uses the system
+# /lib64/libstdc++.so.6 (GCC 11), so building with Rocky 9's GCC 11 matches the host exactly.
+target_link_options(${BUNDLE_NAME} PRIVATE
+  -Wl,--version-script=${OFX_DIR}/Support/include/linuxSymbols -Wl,--no-undefined)
+set_target_properties(${BUNDLE_NAME} PROPERTIES
+  PREFIX "" SUFFIX ".ofx"
+  LIBRARY_OUTPUT_DIRECTORY ${BUNDLE_DIR}/Contents/${MR_ARCH_DIR})
+
+enable_testing()
+add_executable(test_fill_holes ofx/tests/test_fill_holes.cpp)
+target_link_libraries(test_fill_holes PRIVATE mr_ops)
+add_test(NAME fill_holes COMMAND test_fill_holes)
+
+add_executable(test_load_bundle ofx/tests/test_load_bundle.cpp)
+target_include_directories(test_load_bundle PRIVATE ${OFX_DIR}/include)
+target_link_libraries(test_load_bundle PRIVATE dl)
+add_dependencies(test_load_bundle ${BUNDLE_NAME})
+add_test(NAME load_bundle
+  COMMAND test_load_bundle ${BUNDLE_DIR}/Contents/${MR_ARCH_DIR}/${BUNDLE_NAME}.ofx)
