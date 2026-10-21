@@ -4,6 +4,7 @@
 // - Output: RGB = source (or the Show Filled view, 11), alpha = the refined matte.
 // - Layout follows Flame's rules: one group = one column of <= 5 rows (CLAUDE.md "Flame host").
 
+#include <sys/stat.h>
 #include <sys/wait.h>
 
 #include <algorithm>
@@ -22,6 +23,7 @@
 #include "log.h"
 #include "ofxsImageEffect.h"
 #include "ops/fill_holes.h"
+#include "ops/solid_core.h"
 #include "process.h"
 #include "user_config.h"
 
@@ -54,15 +56,20 @@ constexpr const char* kPFhClosedLeft = "fhClosedLeft";
 constexpr const char* kPFhClosedRight = "fhClosedRight";
 constexpr const char* kPFhClosedTop = "fhClosedTop";
 constexpr const char* kPFhClosedBottom = "fhClosedBottom";
+constexpr const char* kPScEnable = "scEnable";
+constexpr const char* kPScDepth = "scDepth";
+constexpr const char* kPScEdgeAt = "scEdgeAt";
 constexpr const char* kPDebugLog = "debugLog";
 constexpr const char* kPCollectLogs = "collectLogs";
+constexpr const char* kPSaveMatte = "saveMatte";
 constexpr const char* kPNodeId = "nodeId";
 
 // Stored as indexes in setups: append only.
 enum MatteFrom { kFromAlpha = 0, kFromLuminance = 1, kFromRed = 2 };
 const char* const kMatteFromNames[] = {"Alpha", "Luminance", "Red"};
-enum View { kViewResult = 0, kViewShowFilled = 1 };
-const char* const kViewNames[] = {"Result", "Show Filled"};
+// Index 0 was "Result" (= source) in the first build: kept as Source so saved nodes don't change.
+enum View { kViewSource = 0, kViewShowFilled = 1, kViewMatte = 2 };
+const char* const kViewNames[] = {"Source", "Show Filled", "Matte"};
 
 std::string homeDir() {
   const char* h = std::getenv("HOME");
@@ -102,6 +109,26 @@ int componentCount(OFX::PixelComponentEnum c) {
 
 float clamp01(float v) { return v > 0.0f ? (v < 1.0f ? v : 1.0f) : 0.0f; }  // NaN -> 0
 
+// The input matte (decision 4), top-down (OFX rows are bottom-up), clamped to 0-1 (decision 5).
+std::vector<float> extractMatte(const OFX::Image& src, int from) {
+  const OfxRectI sb = src.getBounds();
+  const int w = sb.x2 - sb.x1, h = sb.y2 - sb.y1, sc = componentCount(src.getPixelComponents());
+  std::vector<float> matte(size_t(w) * h);
+  for (int y = sb.y1; y < sb.y2; ++y) {
+    const auto* p = static_cast<const float*>(src.getPixelAddress(sb.x1, y));
+    float* m = &matte[size_t(sb.y2 - 1 - y) * w];
+    for (int x = 0; x < w; ++x, p += sc) {
+      float v;
+      if (sc == 1) v = p[0];
+      else if (from == kFromLuminance) v = 0.2126f * p[0] + 0.7152f * p[1] + 0.0722f * p[2];
+      else if (from == kFromRed) v = p[0];
+      else v = sc == 4 ? p[3] : 1.0f;
+      m[x] = clamp01(v);
+    }
+  }
+  return matte;
+}
+
 class MatteRefineEffect : public OFX::ImageEffect {
  public:
   explicit MatteRefineEffect(OfxImageEffectHandle handle) : ImageEffect(handle) {
@@ -118,6 +145,9 @@ class MatteRefineEffect : public OFX::ImageEffect {
     fhClosedRight_ = fetchBooleanParam(kPFhClosedRight);
     fhClosedTop_ = fetchBooleanParam(kPFhClosedTop);
     fhClosedBottom_ = fetchBooleanParam(kPFhClosedBottom);
+    scEnable_ = fetchBooleanParam(kPScEnable);
+    scDepth_ = fetchDoubleParam(kPScDepth);
+    scEdgeAt_ = fetchDoubleParam(kPScEdgeAt);
     debugLog_ = fetchBooleanParam(kPDebugLog);
     OFX::StringParam* nodeIdParam = fetchStringParam(kPNodeId);
     try {
@@ -158,6 +188,8 @@ class MatteRefineEffect : public OFX::ImageEffect {
     LOGI("changedParam %s (user) time=%g", name.c_str(), args.time);
     if (name == kPCollectLogs) {
       collectLogs();
+    } else if (name == kPSaveMatte) {
+      saveMatte(args.time);
     } else if (name == kPDebugLog) {
       bool on = false;
       debugLog_->getValue(on);
@@ -189,25 +221,28 @@ class MatteRefineEffect : public OFX::ImageEffect {
     const OfxRectI sb = src ? src->getBounds() : out->getBounds();
     const int w = sb.x2 - sb.x1, h = sb.y2 - sb.y1;
     const int sc = src ? componentCount(src->getPixelComponents()) : 0;
-    int from = kFromAlpha, view = kViewResult;
+    int from = kFromAlpha, view = kViewMatte;
     matteFrom_->getValueAtTime(args.time, from);
     view_->getValueAtTime(args.time, view);
     if (src && from == kFromAlpha && sc == 3) warning = "The source has no alpha: Matte From is Alpha.";
 
-    // Input matte, top-down (OFX rows are bottom-up), clamped to 0-1 (decision 5).
-    std::vector<float> matte(size_t(w) * h, 0.0f);
-    if (src) {
-      for (int y = sb.y1; y < sb.y2; ++y) {
-        const auto* p = static_cast<const float*>(src->getPixelAddress(sb.x1, y));
-        float* m = &matte[size_t(sb.y2 - 1 - y) * w];
-        for (int x = 0; x < w; ++x, p += sc) {
-          float v;
-          if (sc == 1) v = p[0];
-          else if (from == kFromLuminance) v = 0.2126f * p[0] + 0.7152f * p[1] + 0.0722f * p[2];
-          else if (from == kFromRed) v = p[0];
-          else v = sc == 4 ? p[3] : 1.0f;
-          m[x] = clamp01(v);
-        }
+    std::vector<float> matte = src ? extractMatte(*src, from) : std::vector<float>(size_t(w) * h, 0.0f);
+    std::string inLog;  // what actually arrived
+    if (src && !matte.empty()) {
+      const auto mm = std::minmax_element(matte.begin(), matte.end());
+      if (*mm.first == *mm.second && warning.empty()) {
+        char b[160];
+        std::snprintf(b, sizeof b, "The input matte (%s) is constant %.2f: is the matte connected?",
+                      kMatteFromNames[std::min(std::max(from, 0), 2)], *mm.first);
+        warning = b;
+      }
+      if (logEnabled(LogLevel::Debug)) {
+        double sum = 0.0;
+        for (float v : matte) sum += v;
+        char b[120];
+        std::snprintf(b, sizeof b, " src %d ch, matte min %.3f mean %.3f max %.3f,", sc, *mm.first,
+                      sum / matte.size(), *mm.second);
+        inLog = b;
       }
     }
     const auto t1 = std::chrono::steady_clock::now();
@@ -230,10 +265,33 @@ class MatteRefineEffect : public OFX::ImageEffect {
       FillHolesStats st;
       const auto f0 = std::chrono::steady_clock::now();
       fillHoles(matte.data(), result.data(), w, h, p, &st);
-      char b[160];
-      std::snprintf(b, sizeof b, " fillHoles %.1f ms (%d filled, %d too large, %lld px)",
+      char b[400];
+      std::snprintf(b, sizeof b,
+                    " fillHoles [thr=%.3g max=%.3g%% bridge=%.3g rim=%.3g closed=%s%s%s%s] %.1f ms "
+                    "(%d filled, %d too large, %d notches kept, %lld px changed; %.2f%% below "
+                    "thr, %.2f%% outside)",
+                    p.threshold, p.maxHolePercent, p.bridgePx, p.rimPx, p.closedLeft ? "L" : "",
+                    p.closedRight ? "R" : "", p.closedTop ? "T" : "", p.closedBottom ? "B" : "",
                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - f0).count(),
-                    st.holesFilled, st.holesTooLarge, st.pixelsChanged);
+                    st.holesFilled, st.holesTooLarge, st.notchesKept, st.pixelsChanged,
+                    100.0 * st.belowThreshold / std::max<size_t>(matte.size(), 1),
+                    100.0 * st.outsidePixels / std::max<size_t>(matte.size(), 1));
+      opLog += b;
+    }
+    bool scOn = false;
+    scEnable_->getValueAtTime(args.time, scOn);
+    if (src && scOn) {
+      SolidCoreParams p;
+      p.depthPx = scDepth_->getValueAtTime(args.time) * args.renderScale.x;  // decision 6
+      p.edgeAt = float(scEdgeAt_->getValueAtTime(args.time));
+      SolidCoreStats st;
+      const auto c0 = std::chrono::steady_clock::now();
+      solidCore(result.data(), result.data(), w, h, p, &st);
+      char b[160];
+      std::snprintf(b, sizeof b, " solidCore [depth=%.3g edge=%.3g] %.1f ms (%lld px changed)",
+                    p.depthPx, p.edgeAt,
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - c0).count(),
+                    st.pixelsChanged);
       opLog += b;
     }
 
@@ -259,6 +317,8 @@ class MatteRefineEffect : public OFX::ImageEffect {
           const float m = matte[i], d = a - m;
           px[0] = px[2] = m * (1.0f - d) + d;
           px[1] = m * (1.0f - d);
+        } else if (view == kViewMatte) {
+          px[0] = px[1] = px[2] = a;
         } else {
           const auto* sp = static_cast<const float*>(src->getPixelAddress(x, y));
           px[0] = sp[0];
@@ -277,15 +337,47 @@ class MatteRefineEffect : public OFX::ImageEffect {
       LOGW("render: persistent message FAILED: %s", e.what());
     }
     const auto t2 = std::chrono::steady_clock::now();
-    LOGD("render t=%g %dx%d scale=%g from=%s view=%s: read %.1f ms,%s total %.1f ms%s%s", args.time,
-         w, h, args.renderScale.x, kMatteFromNames[std::min(std::max(from, 0), 2)],
-         kViewNames[std::min(std::max(view, 0), 1)],
+    LOGD("render t=%g %dx%d scale=%g from=%s view=%s:%s read %.1f ms,%s total %.1f ms%s%s",
+         args.time, w, h, args.renderScale.x, kMatteFromNames[std::min(std::max(from, 0), 2)],
+         kViewNames[std::min(std::max(view, 0), 2)], inLog.c_str(),
          std::chrono::duration<double, std::milli>(t1 - t0).count(), opLog.c_str(),
          std::chrono::duration<double, std::milli>(t2 - t0).count(), warning.empty() ? "" : " | ",
          warning.c_str());
   }
 
  private:
+  // Writes this frame's input matte (what the ops see) for offline analysis on this machine:
+  // ~/.cache/matte-refine/dumps/<node>_t<time>.f32 (w*h floats, top row first) + .txt.
+  void saveMatte(double time) {
+    std::unique_ptr<OFX::Image> src(src_->fetchImage(time));
+    if (!src || src->getPixelDepth() != OFX::eBitDepthFloat) {
+      sendMessage(OFX::Message::eMessageError, "", "Save Matte: no 32-bit float source image.");
+      return;
+    }
+    int from = kFromAlpha;
+    matteFrom_->getValueAtTime(time, from);
+    const std::vector<float> matte = extractMatte(*src, from);
+    const OfxRectI b = src->getBounds();
+    const std::string logs = logDir();
+    const std::string dir = logs.substr(0, logs.rfind('/')) + "/dumps";
+    mkdir(dir.c_str(), 0700);
+    char base[64];
+    std::snprintf(base, sizeof base, "/%s_t%g", nodeId_.c_str(), time);
+    const std::string path = dir + base;
+    std::ofstream raw(path + ".f32", std::ios::binary);
+    raw.write(reinterpret_cast<const char*>(matte.data()), std::streamsize(matte.size() * sizeof(float)));
+    std::ofstream txt(path + ".txt");
+    txt << "width=" << (b.x2 - b.x1) << "\nheight=" << (b.y2 - b.y1)
+        << "\nformat=float32 little-endian, top row first, 0-1\nmatte_from="
+        << kMatteFromNames[std::min(std::max(from, 0), 2)] << "\ntime=" << time << "\n";
+    const bool ok = raw.good() && txt.good();
+    LOGI("saveMatte t=%g %dx%d -> %s.f32 %s", time, b.x2 - b.x1, b.y2 - b.y1, path.c_str(),
+         ok ? "ok" : "FAILED");
+    sendMessage(ok ? OFX::Message::eMessageMessage : OFX::Message::eMessageError, "",
+                ok ? "Matte saved to " + path + ".f32 (stays on this machine)."
+                   : "Could not write " + path + ".f32");
+  }
+
   // Bundles the logs and an environment snapshot for a support request.
   void collectLogs() {
     const std::string dir = logDir();
@@ -328,6 +420,9 @@ class MatteRefineEffect : public OFX::ImageEffect {
   OFX::BooleanParam* fhClosedRight_;
   OFX::BooleanParam* fhClosedTop_;
   OFX::BooleanParam* fhClosedBottom_;
+  OFX::BooleanParam* scEnable_;
+  OFX::DoubleParam* scDepth_;
+  OFX::DoubleParam* scEdgeAt_;
   OFX::BooleanParam* debugLog_;
   std::string nodeId_;
   bool inChangedParam_ = false;
@@ -402,11 +497,15 @@ class MatteRefineFactory : public OFX::PluginFactoryHelper<MatteRefineFactory> {
       p->setParent(*g);
       return p;
     };
+    // Digits and increment: Flame showed the first build's doubles as integers (2026-10-21).
     auto number = [&](const char* name, const char* text, const char* hint, double def,
-                      double maxRange, double maxDisplay, OFX::GroupParamDescriptor* g) {
+                      double maxRange, double maxDisplay, int digits, double increment,
+                      OFX::GroupParamDescriptor* g) {
       auto* p = labelled(desc.defineDoubleParam(name), text, hint);
       p->setRange(0.0, maxRange);
       p->setDisplayRange(0.0, maxDisplay);
+      p->setDigits(digits);
+      p->setIncrement(increment);
       p->setDefault(def);
       p->setParent(*g);
       return p;
@@ -421,10 +520,12 @@ class MatteRefineFactory : public OFX::PluginFactoryHelper<MatteRefineFactory> {
     from->setDefault(kFromAlpha);
     from->setParent(*gMatte);
     auto* view = labelled(desc.defineChoiceParam(kPView), "View",
-                          "Result: the image output is the source. Show Filled: the image "
-                          "output is the input matte in grey with the added fill in magenta.");
+                          "What the image output shows (the matte output is always the refined "
+                          "matte). Matte: the refined matte. Show Filled: the input matte in grey "
+                          "with the added fill in magenta. Source: the source image, for a "
+                          "front + matte chain.");
     for (const char* c : kViewNames) view->appendOption(c);
-    view->setDefault(kViewResult);
+    view->setDefault(kViewMatte);  // decision 11: both outputs agree
     view->setParent(*gMatte);
     auto* version = labelled(desc.defineStringParam("version"), "Version", "");
     version->setStringType(OFX::eStringTypeLabel);
@@ -436,20 +537,20 @@ class MatteRefineFactory : public OFX::PluginFactoryHelper<MatteRefineFactory> {
     // --- Fill Holes (5 rows; decisions 8-10) ---
     auto* gFh = group("grpFillHoles", "Fill Holes");
     boolean(kPFhEnable, "Enable", "Fill holes enclosed by solid matte with white.", true, gFh);
-    number(kPFhThreshold, "Solid Above", "Matte at or above this value counts as solid.", 0.5, 1.0,
-           1.0, gFh);
+    number(kPFhThreshold, "Solid Above", "Matte at or above this value counts as solid.", 0.95, 1.0,
+           1.0, 3, 0.01, gFh);
     number(kPFhMaxHole, "Max Hole %",
            "Holes larger than this percentage of the frame stay open (real gaps, e.g. an arm "
            "on a hip). 0 = fill every enclosed hole.",
-           1.0, 100.0, 10.0, gFh);
+           1.0, 100.0, 10.0, 2, 0.1, gFh);
     number(kPFhBridge, "Bridge Gaps px",
            "Also fill holes whose solid edge has a gap up to this many pixels wide. 0 = only "
            "fully enclosed holes.",
-           0.0, 200.0, 20.0, gFh);
+           0.0, 200.0, 20.0, 1, 0.5, gFh);
     number(kPFhRim, "Rim px",
            "Also lift the soft rim around a filled hole to white, up to this many pixels into "
            "the solid matte.",
-           1.0, 50.0, 5.0, gFh);
+           1.0, 50.0, 5.0, 1, 0.5, gFh);
 
     // --- Fill Holes Edges (4 rows) ---
     auto* gEdges = group("grpFillHolesEdges", "Fill Holes Edges");
@@ -460,7 +561,22 @@ class MatteRefineFactory : public OFX::PluginFactoryHelper<MatteRefineFactory> {
     boolean(kPFhClosedTop, "Top Closed", edgeHint, false, gEdges);
     boolean(kPFhClosedBottom, "Bottom Closed", edgeHint, false, gEdges);
 
-    // --- Support (2 rows, per user) ---
+    // --- Solid Core (3 rows; decision 15) ---
+    auto* gSc = group("grpSolidCore", "Solid Core");
+    boolean(kPScEnable, "Enable",
+            "Make everything deeper than Depth inside the matte solid white; the outer Depth "
+            "pixels of edge are not touched.",
+            false, gSc);
+    number(kPScDepth, "Depth px",
+           "The core starts this many pixels inside the edge. Smaller = more of the soft edge "
+           "becomes solid.",
+           6.0, 200.0, 50.0, 1, 0.5, gSc);
+    // Not 0: nothing is below 0, so the whole frame would be core and turn white (Flame test 3).
+    number(kPScEdgeAt, "Edge At", "The matte value where the edge is measured from.", 0.5, 1.0,
+           1.0, 3, 0.01, gSc)
+        ->setRange(0.01, 1.0);
+
+    // --- Support (3 rows, per user) ---
     auto* gSupport = group("grpSupport", "Support");
     auto* dbg = boolean(kPDebugLog, "Debug Logging",
                         "Verbose logging for troubleshooting (per user).", false, gSupport);
@@ -468,6 +584,10 @@ class MatteRefineFactory : public OFX::PluginFactoryHelper<MatteRefineFactory> {
     dbg->setEvaluateOnChange(false);
     labelled(desc.definePushButtonParam(kPCollectLogs), "Collect Logs",
              "Write a support bundle (logs and system details) to your home folder.")
+        ->setParent(*gSupport);
+    labelled(desc.definePushButtonParam(kPSaveMatte), "Save Matte",
+             "Save this frame's input matte to ~/.cache/matte-refine/dumps for analysis. It "
+             "stays on this machine.")
         ->setParent(*gSupport);
 
     // --- Hidden ---
