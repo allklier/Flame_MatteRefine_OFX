@@ -21,7 +21,8 @@ first operation is needed for a project the same day.
 | # | Operation | Kind | Status |
 |---|---|---|---|
 | 1 | **Fill Holes**: fill holes enclosed by solid matte, leave the outside edge untouched | algorithmic, in render | v0.1, building |
-| 2 | **Edge Refine**: refine the edges of an existing matte with a trimap-based model | ML, needs research | roadmap (decision 12) |
+| 2 | **Solid Core**: everything deeper than N px inside the matte's edge becomes 1.0 | algorithmic, in render | v0.1, built (decision 15) |
+| 3 | **Edge Refine**: refine the edges of an existing matte with a trimap-based model | ML, needs research | roadmap (decision 12) |
 
 ## Architecture
 
@@ -33,7 +34,8 @@ Flame ──OFX──> MatteRefine.ofx (one effect "Matte Refine", grouping "Mat
    ofx/src/plugin.cpp: params, layout, render, Collect Logs, version label
 ```
 
-Source files: `ofx/src/plugin.cpp` (the effect), `ops/fill_holes.*` (op 1), `log.*`,
+Source files: `ofx/src/plugin.cpp` (the effect), `ops/fill_holes.*` (op 1), `ops/solid_core.*`
+(op 2), `ops/morphology.*` (dilate + distance transform, shared), `log.*`,
 `user_config.*` (`~/.config/matte-refine/config.conf`, `log_level`), `env_info.*`,
 `process.*` (tar for Collect Logs) and `platform.h` + `platform_linux.cpp` (OS, CPU, RAM for the
 snapshot), the last five copied from LTX and trimmed. Tests: `ofx/tests/`.
@@ -73,10 +75,12 @@ BSD), copied from LTX's vendored copy.
 ### Matte in, matte out
 
 - **4. DECIDED (user, 2026-10-21): Matte From** choice (Alpha / Luminance / Red), default Alpha.
-  Output alpha = the refined matte; output RGB = the source RGB unchanged (pass-through), so the
-  node drops into a front + matte chain. Flame hands 32-bit float RGBA and forces RGBA output;
+  Output alpha = the refined matte; output RGB per View (11), by default the refined matte too. Flame hands 32-bit float RGBA and forces RGBA output;
   alpha is the node's matte output (LTX decision 48). Luminance = Rec.709 weights.
   UNVERIFIED (from LTX): that a matte on the node's matte socket arrives in the source alpha.
+  Flame test 1 (2026-10-21): with nothing on the matte socket, Alpha gave a constant matte and
+  0 holes; the footer now warns when the input matte is constant. Luminance of a matte on the
+  front input works.
 - **5. Render is synchronous and per frame** (14). Ops run in `render()` on Flame's main thread
   (all OFX actions do), so the algorithmic chain must stay well under ~100 ms at UHD. No
   temporal processing. Input outside 0–1 (float) is clamped to 0–1 before the ops.
@@ -88,7 +92,8 @@ BSD), copied from LTX's vendored copy.
   of the frame. That is why it doesn't damage the outer edge the way dilate/close does.
 - **8. Params and defaults (DECIDED, user 2026-10-21).**
   Group "Fill Holes": **Enable** (on), **Threshold** (labelled "Solid Above", since Flame may
-  not show hints; 0.5: matte ≥ it is solid), **Max Hole %**
+  not show hints; **0.95** (user, 2026-10-21, after Flame test 1: 0.97 made a keyed product
+  shot solid; was 0.5): matte ≥ it is solid), **Max Hole %**
   (1.0 % of frame area; 0 = no limit; protects real gaps like an arm on a hip), **Bridge Gaps**
   (labelled "Bridge Gaps px"; 0 px: also fill holes whose solid edge has a gap up to about this
   width; the closing radius is half of it), **Rim** ("Rim px", 1 px: lift
@@ -122,11 +127,35 @@ BSD), copied from LTX's vendored copy.
   49–58 ms with Bridge 0, 69–78 ms with Bridge 8; BFD 36–40 / 55 ms. First version (per-pixel
   BFS, full-frame distance transforms) took 92 / 175 ms on akflame5.
 - **10.** Holes are filled with **1.0** (fully solid), not with neighbouring values.
-- **11. DECIDED (user, 2026-10-21): View** choice: **Result** (RGB = source) / **Show Filled**
-  (RGB = the input matte in grey, added fill (out − in) tinted magenta (1, 0, 1), alpha = result).
-  Render-only: no effect on the alpha.
+- **11. DECIDED (user, 2026-10-21): View** choice for the RGB output; alpha is always the result.
+  **Matte** (default since Flame test 3: RGB = the refined matte, so both outputs agree), **Show
+  Filled** (RGB = the input matte in grey, added fill (out − in) tinted magenta (1, 0, 1)),
+  **Source** (RGB pass-through, for a front + matte chain). Why: with Matte From = Luminance the
+  front input *is* the matte, so a pass-through RGB showed the unrefined matte next to the
+  refined alpha (user confused in test 3). Indexes: 0 Source (was "Result" = source), 1 Show
+  Filled, 2 Matte, so saved nodes keep their output. Render-only.
 
-### Operation 2: Edge Refine (roadmap)
+### Operation 2: Solid Core
+
+- **15. DECIDED (user, 2026-10-21): Solid Core, its own section after Fill Holes.** Found in
+  Flame test 1: with Solid Above 0.97 the center filled, but a side face keyed semi-transparent
+  (0.6–0.97) stayed grey. It is a broad soft band joined to the outer edge (row profile ×100:
+  `2, 40, 85, 96, 97, 97, 98 … 99, 95, 77, 82, 98`), so no hole rule can tell it from a soft
+  edge. Solid Core: every pixel farther than **Depth px** (6) from any pixel below **Edge At**
+  (0.5) becomes 1.0, so the outer Depth px of edge are bit-identical and real gaps (below Edge
+  At) keep a Depth px margin. Pixels beyond the frame don't count as edge (a subject cut by the
+  frame cores up to it). **Enable** defaults off: it also solidifies legitimately
+  semi-transparent areas deeper than Depth. On the test frame (2880×1620, dump t36): pixels
+  below 0.9 more than 8 px inside the subject 3522 → 16, edge band unchanged, none darker.
+  Measured: UHD 18 ms (BFD), 36 ms (akflame5). Fill Holes + Solid Core at UHD on akflame5 can
+  exceed 100 ms with I/O; at 2880×1620 about 75 ms.
+  **Edge At min 0.01** (Flame test 3, 2026-10-21): at 0 nothing is below it, so the whole frame
+  became core (4.2M px white). Same test: "stubborn holes" were grey slivers (0.45–0.9) with
+  Solid Above lowered to 0.48, i.e. solid by definition; at 0.95 all filled, nothing outside
+  the 0.5 contour changed. Lesson: when params "make no difference", check the threshold
+  against the hole's values first (dump + log line).
+
+### Operation 3: Edge Refine (roadmap)
 
 - **12. Roadmap, not designed** (user, 2026-10-21: needs its own conversation and research).
   Refine an existing matte's edges with a trimap-based matting model: trimap from the input
@@ -156,10 +185,14 @@ BSD), copied from LTX's vendored copy.
 - `getClipPreferences` → Alpha-only is ignored: output stays RGBA (image + matte outputs).
 - Persistent messages show in the footer; `sendMessage` shows popups. Flame may not show param
   hints, so labels say what they do.
+- **Doubles without `setDigits`/`setIncrement` showed as integers** (Flame test 1, 2026-10-21:
+  Solid Above couldn't be set between 0 and 1). Now digits 3/2/1, increment 0.01/0.1/0.5
+  (`ofxsParams.cpp:494-503`); whether Flame honours them: UNVERIFIED.
 
 **Planned layout (tab 1):** Matte (Matte From 2, View 2, Version label 1) · Fill Holes (Enable,
-Threshold, Max Hole %, Bridge Gaps, Rim) · Fill Holes Edges (4 booleans) · Support (Collect
-Logs). Four columns; two left for future ops before tab 2.
+Threshold, Max Hole %, Bridge Gaps, Rim) · Fill Holes Edges (4 booleans) · Solid Core (Enable,
+Depth px, Edge At) · Support (Debug Logging, Collect Logs, Save Matte). Five columns; one left
+before tab 2.
 
 ## Logging and support (LTX decision 39, scaled down)
 
@@ -168,13 +201,22 @@ Logs). Four columns; two left for future ops before tab 2.
   snapshot at load (version + git, host, OS, glibc, CPU); INFO for user actions and param edits;
   DEBUG for renders with per-op timings. Never logged: image data, clip or project names.
 - **Collect Logs** button → `~/matte-refine-support-<ts>.tar.gz`.
-- Version label on the node ("0.1.0 (git hash)") so a Flame test shows which build is loaded.
+- **Save Matte** button → this frame's input matte as raw float32 (top row first) + a `.txt`
+  header in `~/.cache/matte-refine/dumps/`, for exact analysis of a failing frame. Footage can
+  be confidential: dumps stay on the machine; analyse them there or in a private scratch
+  folder, never upload or commit them.
+- DEBUG render line: settings, source channels, input matte min/mean/max, holes filled / too
+  large / notches kept, % below threshold, % outside, per-op time.
+- Version label on the node ("0.1.1 (git hash)") so a Flame test shows which build is loaded.
 
 ## Building, testing, releasing
 
 - Linux release builds on the Rocky 9 build host (`HOST=<host> scripts/build_remote.sh`); local
   test builds on any Linux with `cmake -S . -B <build>` (not loadable in Flame: newer glibc).
-- **Unit tests (ctest, 2):** `fill_holes` on synthetic mattes: simple hole, outer soft edge
+- **Unit tests (ctest, 3):** `solid_core`: core white, edge band and a gap's margin untouched,
+  thin strip untouched, frame border not an edge, 30 random cases against brute force (both
+  dilation paths), UHD timing; a halved-depth mutation fails it.
+  `fill_holes` on synthetic mattes: simple hole, outer soft edge
   bit-identical, Max Hole % at the limit, diagonal seal, closed frame edges, bridged gap vs outer
   notch, a hole swallowed by the closing, rim distance, never lowers a pixel (noise), in place,
   48 random cases against a naive reference (both dilation paths), UHD timing (< 100 ms with
@@ -189,6 +231,20 @@ Logs). Four columns; two left for future ops before tab 2.
 ## Roadmap
 
 - Before a release package: the system test, `scripts/package_release.sh`, README for users.
+- **Analyze Frame** (PROPOSED, user 2026-10-21; build only if finding parameters stays hard). A
+  button that analyses the current frame and sets the controls, with a popup saying what it
+  chose and why. No LLM: plain C++ statistics on the matte. Solid Above just below the
+  interior's solid plateau, above the grey defects (the setting that went wrong in tests 1 and
+  3); edge Closed switches for the frame edges the subject touches; Max Hole % at the largest
+  size jump between defects and real gaps (0 if none); Solid Core only if grey remains deep
+  inside after Fill Holes, Depth from where it starts; Bridge Gaps 0 unless holes leak through
+  narrow gaps. ~2–3 h with tests; the saved dumps (tests 1 and 3) are the first cases.
+  **Learn from use instead of up-front tuning:** each press records the frame's matte (as Save
+  Matte), the analysis and the suggested values; the values the user settles on are recorded
+  later (on the next Analyze, Save Matte, or when the node is destroyed). The pairs (suggested,
+  settled) tune the heuristics over time. Footage is confidential: records stay on the
+  machine (`~/.cache/matte-refine/analyze/`, size-capped), never uploaded; Collect Logs
+  includes only the parameter records, not the mattes, unless the user adds them.
 
 - Operation 2, Edge Refine (decision 12). macOS bundle (13).
 - Not planned (14): a matte cache, a Process button.
@@ -197,7 +253,12 @@ Logs). Four columns; two left for future ops before tab 2.
 
 ## Dead ends
 
-- (none yet; LTX's Flame dead ends apply: `setPageParamOrder`, Alpha-only output, reacting to
+- **Greyscale hole filling** (morphological reconstruction by erosion; each pixel raised to its
+  lowest wall to the frame edge), tried 2026-10-21 on the test dump for the grey side face: no
+  gain there (pixels below 0.9 inside: 3521 vs 3522; the face is joined to the edge, not
+  walled), and it raised 340k background pixels (noise lifted to its neighbours). Solid Core
+  (15) solved it.
+- (LTX's Flame dead ends apply: `setPageParamOrder`, Alpha-only output, reacting to
   plugin-edit `changedParam`, background-thread param sets.)
 
 ## Conventions

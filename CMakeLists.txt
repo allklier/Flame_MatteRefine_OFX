@@ -8,9 +8,10 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# Release version (0.1.0 = Fill Holes). Also the OFX plugin version (major.minor) and the
+# Release version (0.1.0 = Fill Holes; 0.1.1 = Solid Core, View Matte default, Solid Above
+# 0.95, decimals, Save Matte, diagnostics). Also the OFX plugin version (major.minor) and the
 # release package name.
-set(MR_VERSION "0.1.0")
+set(MR_VERSION "0.1.1")
 string(REPLACE "." ";" MR_VERSION_PARTS "${MR_VERSION}")
 list(GET MR_VERSION_PARTS 0 MR_VERSION_MAJOR)
 list(GET MR_VERSION_PARTS 1 MR_VERSION_MINOR)
@@ -51,7 +52,8 @@ else()
 endif()
 
 # The operations: pure logic, shared with the unit tests (decision 3).
-add_library(mr_ops STATIC ofx/src/ops/fill_holes.cpp)
+add_library(mr_ops STATIC ofx/src/ops/morphology.cpp ofx/src/ops/fill_holes.cpp
+  ofx/src/ops/solid_core.cpp)
 target_include_directories(mr_ops PUBLIC ofx/src)
 target_compile_options(mr_ops PRIVATE -Wall -Wextra -fvisibility=hidden)
 target_link_libraries(mr_ops PUBLIC Threads::Threads)
@@ -80,6 +82,9 @@ enable_testing()
 add_executable(test_fill_holes ofx/tests/test_fill_holes.cpp)
 target_link_libraries(test_fill_holes PRIVATE mr_ops)
 add_test(NAME fill_holes COMMAND test_fill_holes)
+add_executable(test_solid_core ofx/tests/test_solid_core.cpp)
+target_link_libraries(test_solid_core PRIVATE mr_ops)
+add_test(NAME solid_core COMMAND test_solid_core)
 
 add_executable(test_load_bundle ofx/tests/test_load_bundle.cpp)
 target_include_directories(test_load_bundle PRIVATE ${OFX_DIR}/include)

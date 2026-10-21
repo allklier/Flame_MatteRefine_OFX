@@ -15,7 +15,10 @@ struct FillHolesParams {
 struct FillHolesStats {
   int holesFilled = 0;
   int holesTooLarge = 0;
+  int notchesKept = 0;          // left as outer edge (decision 9, step 4)
   long long pixelsChanged = 0;
+  long long belowThreshold = 0;  // diagnostics for the log
+  long long outsidePixels = 0;
 };
 
 // in, out: w*h floats, row 0 = the top row. out may be in.
