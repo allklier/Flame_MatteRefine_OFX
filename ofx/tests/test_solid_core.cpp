@@ -6,6 +6,7 @@
 #include <random>
 #include <vector>
 
+#include "edge_reference.h"
 #include "ops/solid_core.h"
 
 using mr::SolidCoreParams;
@@ -91,27 +92,11 @@ void testFrameBorder() {
   CHECK(out.at(0, 0) == 1.0f && out.at(39, 29) == 1.0f);
 }
 
-// The contour offset of a below pixel (decision 16), written out independently of the op.
-double contourOffset(const Img& in, int x, int y, float edgeAt) {
-  if (in.at(x, y) >= edgeAt) return 0.0;
-  double inv = 0.0;
-  const int nb[2][2][2] = {{{-1, 0}, {1, 0}}, {{0, -1}, {0, 1}}};
-  for (const auto& axis : nb) {
-    double t = 2.0;
-    for (const auto& o : axis) {
-      const int nx = x + o[0], ny = y + o[1];
-      if (nx < 0 || ny < 0 || nx >= in.w || ny >= in.h || in.at(nx, ny) < edgeAt) continue;
-      t = std::min(t, (edgeAt - in.at(x, y)) / double(in.at(nx, ny) - in.at(x, y)));
-    }
-    if (t <= 1.0) inv += 1.0 / (t * t);
-  }
-  return inv > 0.0 ? 1.0 / std::sqrt(inv) : 0.0;
-}
-
 // Against brute force. Hard (Feather 0): a pixel becomes 1 iff no pixel below Edge At lies
-// within Depth. Soft: D = min over below pixels q of |p - q| - offset(q); a pixel with grid
-// distance <= Depth stays, else max(in, smoothstep((D - Depth) / Feather)). When stamping would
-// cost more than a frame of writes (morphology.h), D = the plain grid distance.
+// within Depth. Soft: D = the distance to the Edge At contour; a pixel with grid
+// distance <= Depth stays, else max(in, smoothstep((D - Depth) / Feather)), D per
+// edge_reference.h (the contour as tangent segments). When stamping would
+// cost more than 2 frames of writes (morphology.h), D = the plain grid distance.
 void testAgainstBruteForce(double feather) {
   std::mt19937 rng(5);
   std::uniform_real_distribution<float> u(0.0f, 1.0f);
@@ -125,7 +110,7 @@ void testAgainstBruteForce(double feather) {
     p.featherPx = feather;
     const Img out = run(in, p);
     // Which path the op takes: boundary pixels x disc offsets (radius Depth + Feather + 1).
-    const double rs = p.depthPx + feather + 1.0;
+    const double rs = p.depthPx + feather + (feather > 0 ? 1.5 : 0.0);
     long disc = 0, boundary = 0;
     for (int dy = -int(rs); dy <= int(rs); ++dy)
       for (int dx = -int(rs); dx <= int(rs); ++dx) disc += (dx || dy) && dx * dx + dy * dy <= rs * rs;
@@ -135,18 +120,18 @@ void testAgainstBruteForce(double feather) {
         boundary += below(x, y) && ((x > 0 && !below(x - 1, y)) || (x + 1 < in.w && !below(x + 1, y)) ||
                                     (y > 0 && !below(x, y - 1)) || (y + 1 < in.h && !below(x, y + 1)));
       }
-    const bool exact = double(boundary) * disc <= double(in.w) * in.h;
+    const bool exact = double(boundary) * disc <= 2.0 * double(in.w) * in.h;
     if (feather > 0) (exact ? exactPath : fallbackPath)++;
+    const std::vector<ref::Boundary> edge = ref::boundary(in.v, in.w, in.h, p.edgeAt, true);
     for (int y = 0; y < in.h; ++y)
       for (int x = 0; x < in.w; ++x) {
-        double g2 = 1e30, dRef = 1e30;
+        double g2 = 1e30;
         for (int j = 0; j < in.w * in.h; ++j) {
           if (in.v[j] >= p.edgeAt) continue;
-          const int qx = j % in.w, qy = j / in.w, dx = qx - x, dy = qy - y;
+          const int dx = j % in.w - x, dy = j / in.w - y;
           g2 = std::min(g2, double(dx * dx + dy * dy));
-          dRef = std::min(dRef, std::sqrt(double(dx * dx + dy * dy)) - contourOffset(in, qx, qy, p.edgeAt));
         }
-        if (!exact) dRef = std::sqrt(g2);
+        double dRef = in.at(x, y) < p.edgeAt ? 0.0 : exact ? ref::distance(edge, x, y) : std::sqrt(g2);
         float want = in.at(x, y);
         if (feather <= 0) {
           if (g2 > p.depthPx * p.depthPx) want = 1.0f;

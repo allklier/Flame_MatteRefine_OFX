@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <atomic>
 #include <thread>
 #include <utility>
 
@@ -11,20 +12,6 @@ namespace mr {
 namespace {
 
 constexpr double kFar = 1e20;
-
-// Runs fn(begin, end) over [0, n) on up to 32 threads, at least minPerThread items each.
-template <class F>
-void parallelFor(int n, int minPerThread, F fn) {
-  const int t =
-      std::max(1, std::min({int(std::thread::hardware_concurrency()), 32, n / minPerThread}));
-  if (t == 1) {
-    fn(0, n);
-    return;
-  }
-  std::vector<std::thread> pool;
-  for (int i = 0; i < t; ++i) pool.emplace_back(fn, n * i / t, n * (i + 1) / t);
-  for (auto& th : pool) th.join();
-}
 
 // 1-D squared distance transform of f (Felzenszwalb & Huttenlocher, "Distance Transforms of
 // Sampled Functions", 2012). v, z: scratch of n and n + 1.
@@ -95,13 +82,25 @@ void discAndBoundary(const Mask& m, int w, int h, double r, std::vector<std::pai
   for (int dy = -ri; dy <= ri; ++dy)
     for (int dx = -ri; dx <= ri; ++dx)
       if ((dx || dy) && dx * dx + dy * dy <= r * r) disc.emplace_back(dx, dy);
-  for (int y = 0; y < h; ++y)
-    for (int x = 0; x < w; ++x) {
-      const size_t i = size_t(y) * w + x;
-      if (m[i] && ((x > 0 && !m[i - 1]) || (x + 1 < w && !m[i + 1]) || (y > 0 && !m[i - w]) ||
-                   (y + 1 < h && !m[i + w])))
-        boundary.push_back(int(i));
-    }
+  // Rows in bands on threads, joined in order: the list stays sorted by index.
+  std::vector<std::vector<int>> part(64);
+  std::atomic<int> nextPart{0};
+  parallelFor(h, 32, [&](int y0, int y1) {
+    std::vector<int>& out = part[size_t(nextPart++)];
+    out.push_back(y0);  // the band's first row, to sort the parts
+    for (int y = y0; y < y1; ++y)
+      for (int x = 0; x < w; ++x) {
+        const size_t i = size_t(y) * w + x;
+        if (m[i] && ((x > 0 && !m[i - 1]) || (x + 1 < w && !m[i + 1]) || (y > 0 && !m[i - w]) ||
+                     (y + 1 < h && !m[i + w])))
+          out.push_back(int(i));
+      }
+  });
+  part.resize(size_t(nextPart));
+  std::sort(part.begin(), part.end(), [](const std::vector<int>& a, const std::vector<int>& b) {
+    return a[0] < b[0];
+  });
+  for (const auto& p : part) boundary.insert(boundary.end(), p.begin() + 1, p.end());
 }
 
 }  // namespace
@@ -129,36 +128,55 @@ Mask dilate(const Mask& m, int w, int h, double r) {
   return out;
 }
 
-// Same two paths as dilate. Offsets are at most 1, so a pixel within r is within r + 1 of its
-// nearest set pixel; stamping from the boundary is exact as above (other set pixels count with
-// offset 0 and are never nearer than a boundary pixel).
+// Same two paths as dilate. A foot point lies within 1 px of q and its segment within ~1.12 px,
+// so a pixel within r of the contour is within r + 1.5 of the q it is measured from; stamping
+// from the boundary is exact as above. Squared distances, one sqrt per pixel at the end.
 std::vector<float> distanceWithin(const Mask& m, int w, int h, double r,
-                                  const std::function<float(int)>& offset) {
+                                  const std::function<ContourFoot(int)>& foot) {
   std::vector<std::pair<int, int>> disc;
   std::vector<int> boundary;
-  discAndBoundary(m, w, h, r + 1.0, disc, boundary);
+  discAndBoundary(m, w, h, r + 1.5, disc, boundary);
   std::vector<float> d(m.size());
-  if (double(boundary.size()) * disc.size() > double(m.size())) {
+  // Measured at UHD (BFD, 2026-10-22): stamping costs ~15 ms per frame's worth of writes, the
+  // distance transform 25-45 ms, so they break even near 2 frames.
+  if (double(boundary.size()) * disc.size() > 2.0 * double(m.size())) {
     d = squaredDistance(m, w, h);
     for (float& v : d) v = std::sqrt(v);
     return d;
   }
-  std::vector<float> len(disc.size());
-  for (size_t k = 0; k < disc.size(); ++k)
-    len[k] = float(std::sqrt(double(disc[k].first * disc[k].first + disc[k].second * disc[k].second)));
-  for (size_t i = 0; i < m.size(); ++i) d[i] = m[i] ? 0.0f : float(kFar);
-  for (int i : boundary) {
-    const int x = i % w, y = i / w;
-    const float s = offset(i);
-    d[size_t(i)] = std::min(d[size_t(i)], -s);
-    for (size_t k = 0; k < disc.size(); ++k) {
-      const int nx = x + disc[k].first, ny = y + disc[k].second;
-      if (nx >= 0 && ny >= 0 && nx < w && ny < h) {
-        float& v = d[size_t(ny) * w + nx];
-        v = std::min(v, len[k] - s);
+  std::vector<ContourFoot> feet(boundary.size());
+  parallelFor(int(boundary.size()), 256, [&](int b0, int b1) {
+    for (int b = b0; b < b1; ++b) feet[size_t(b)] = foot(boundary[size_t(b)]);
+  });
+  // Row bands on threads; each band stamps from the boundary pixels within reach of its rows
+  // and writes only its own rows.
+  const int reach = int(std::floor(r + 1.5));
+  parallelFor(h, 16, [&](int y0, int y1) {
+    for (size_t i = size_t(y0) * w; i < size_t(y1) * w; ++i) d[i] = m[i] ? 0.0f : float(kFar);
+    const auto first = std::lower_bound(boundary.begin(), boundary.end(), std::max(y0 - reach, 0) * w);
+    const auto last = std::lower_bound(boundary.begin(), boundary.end(), std::min(y1 + reach, h) * w);
+    for (auto it = first; it != last; ++it) {
+      const int i = *it, x = i % w, y = i / w;
+      const ContourFoot& f = feet[size_t(it - boundary.begin())];
+      const bool line = f.nx != 0.0f || f.ny != 0.0f;
+      for (const auto& o : disc) {
+        const int px = x + o.first, py = y + o.second;
+        if (px < 0 || py < y0 || px >= w || py >= y1) continue;
+        const float ox = float(o.first), oy = float(o.second), grid = ox * ox + oy * oy;
+        float d2 = grid;
+        if (line) {
+          const float vx = ox - f.fx, vy = oy - f.fy;
+          const float perp = vx * f.nx + vy * f.ny;
+          const float along = std::max(0.0f, std::fabs(vy * f.nx - vx * f.ny) - 0.5f);
+          d2 = std::min(grid, perp * perp + along * along);
+        }
+        float& v = d[size_t(py) * w + px];
+        v = std::min(v, d2);
       }
     }
-  }
+    for (size_t i = size_t(y0) * w; i < size_t(y1) * w; ++i)
+      if (d[i] < float(kFar)) d[i] = std::sqrt(d[i]);
+  });
   return d;
 }
 
