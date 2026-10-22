@@ -86,18 +86,15 @@ std::vector<float> squaredDistance(const Mask& m, int w, int h) {
   return g;
 }
 
-}  // namespace
-
-// The nearest set pixel of any other pixel is a boundary pixel (one with an unset 4-neighbour),
-// so stamping a disc on each boundary pixel is exact; when that costs more than a frame's worth
-// of writes (a large r on a noisy matte), the distance transform does it instead.
-Mask dilate(const Mask& m, int w, int h, double r) {
+// Disc offsets within r (centre excluded) and the boundary pixels of m (set, with an unset
+// 4-neighbour): the nearest set pixel of any other pixel is a boundary pixel, so stamping the
+// disc on each boundary pixel is exact.
+void discAndBoundary(const Mask& m, int w, int h, double r, std::vector<std::pair<int, int>>& disc,
+                     std::vector<int>& boundary) {
   const int ri = int(std::floor(r));
-  std::vector<std::pair<int, int>> disc;
   for (int dy = -ri; dy <= ri; ++dy)
     for (int dx = -ri; dx <= ri; ++dx)
       if ((dx || dy) && dx * dx + dy * dy <= r * r) disc.emplace_back(dx, dy);
-  std::vector<int> boundary;
   for (int y = 0; y < h; ++y)
     for (int x = 0; x < w; ++x) {
       const size_t i = size_t(y) * w + x;
@@ -105,6 +102,16 @@ Mask dilate(const Mask& m, int w, int h, double r) {
                    (y + 1 < h && !m[i + w])))
         boundary.push_back(int(i));
     }
+}
+
+}  // namespace
+
+// When stamping costs more than a frame's worth of writes (a large r on a noisy matte), the
+// distance transform does it instead.
+Mask dilate(const Mask& m, int w, int h, double r) {
+  std::vector<std::pair<int, int>> disc;
+  std::vector<int> boundary;
+  discAndBoundary(m, w, h, r, disc, boundary);
   Mask out = m;
   if (double(boundary.size()) * disc.size() > double(m.size())) {
     const std::vector<float> d = squaredDistance(m, w, h);
@@ -120,6 +127,39 @@ Mask dilate(const Mask& m, int w, int h, double r) {
     }
   }
   return out;
+}
+
+// Same two paths as dilate. Offsets are at most 1, so a pixel within r is within r + 1 of its
+// nearest set pixel; stamping from the boundary is exact as above (other set pixels count with
+// offset 0 and are never nearer than a boundary pixel).
+std::vector<float> distanceWithin(const Mask& m, int w, int h, double r,
+                                  const std::function<float(int)>& offset) {
+  std::vector<std::pair<int, int>> disc;
+  std::vector<int> boundary;
+  discAndBoundary(m, w, h, r + 1.0, disc, boundary);
+  std::vector<float> d(m.size());
+  if (double(boundary.size()) * disc.size() > double(m.size())) {
+    d = squaredDistance(m, w, h);
+    for (float& v : d) v = std::sqrt(v);
+    return d;
+  }
+  std::vector<float> len(disc.size());
+  for (size_t k = 0; k < disc.size(); ++k)
+    len[k] = float(std::sqrt(double(disc[k].first * disc[k].first + disc[k].second * disc[k].second)));
+  for (size_t i = 0; i < m.size(); ++i) d[i] = m[i] ? 0.0f : float(kFar);
+  for (int i : boundary) {
+    const int x = i % w, y = i / w;
+    const float s = offset(i);
+    d[size_t(i)] = std::min(d[size_t(i)], -s);
+    for (size_t k = 0; k < disc.size(); ++k) {
+      const int nx = x + disc[k].first, ny = y + disc[k].second;
+      if (nx >= 0 && ny >= 0 && nx < w && ny < h) {
+        float& v = d[size_t(ny) * w + nx];
+        v = std::min(v, len[k] - s);
+      }
+    }
+  }
+  return d;
 }
 
 }  // namespace mr

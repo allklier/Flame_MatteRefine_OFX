@@ -21,7 +21,7 @@ first operation is needed for a project the same day.
 | # | Operation | Kind | Status |
 |---|---|---|---|
 | 1 | **Fill Holes**: fill holes enclosed by solid matte, leave the outside edge untouched | algorithmic, in render | v0.1, building |
-| 2 | **Solid Core**: everything deeper than N px inside the matte's edge becomes 1.0 | algorithmic, in render | v0.1, built (decision 15) |
+| 2 | **Solid Core**: everything deeper than N px inside the matte's edge becomes 1.0 | algorithmic, in render | v0.1, soft edge 0.1.2 (15, 16) |
 | 3 | **Edge Refine**: refine the edges of an existing matte with a trimap-based model | ML, needs research | roadmap (decision 12) |
 
 ## Architecture
@@ -37,8 +37,8 @@ Flame ──OFX──> MatteRefine.ofx (one effect "Matte Refine", grouping "Mat
 Source files: `ofx/src/plugin.cpp` (the effect), `ops/fill_holes.*` (op 1), `ops/solid_core.*`
 (op 2), `ops/morphology.*` (dilate + distance transform, shared), `log.*`,
 `user_config.*` (`~/.config/matte-refine/config.conf`, `log_level`), `env_info.*`,
-`process.*` (tar for Collect Logs) and `platform.h` + `platform_linux.cpp` (OS, CPU, RAM for the
-snapshot), the last five copied from LTX and trimmed. Tests: `ofx/tests/`.
+`process.*` (tar for Collect Logs) and `platform.h` + `platform_linux.cpp` / `platform_macos.cpp`
+(OS, CPU, RAM for the snapshot), the last five copied from LTX and trimmed. Tests: `ofx/tests/`.
 
 Plugin id `com.janklier.matterefine`, version from CMake `MR_VERSION` (OFX version = its
 major.minor), `third_party/openfx` = OpenFX `OFX_Release_1_4_TAG` (`include/` + `Support/`,
@@ -148,12 +148,26 @@ BSD), copied from LTX's vendored copy.
   semi-transparent areas deeper than Depth. On the test frame (2880×1620, dump t36): pixels
   below 0.9 more than 8 px inside the subject 3522 → 16, edge band unchanged, none darker.
   Measured: UHD 18 ms (BFD), 36 ms (akflame5). Fill Holes + Solid Core at UHD on akflame5 can
-  exceed 100 ms with I/O; at 2880×1620 about 75 ms.
+  exceed 100 ms with I/O; at 2880×1620 about 75 ms. Feather 0 (16) is this hard core, bit for bit.
   **Edge At min 0.01** (Flame test 3, 2026-10-21): at 0 nothing is below it, so the whole frame
   became core (4.2M px white). Same test: "stubborn holes" were grey slivers (0.45–0.9) with
   Solid Above lowered to 0.48, i.e. solid by definition; at 0.95 all filled, nothing outside
   the 0.5 contour changed. Lesson: when params "make no difference", check the threshold
   against the hole's values first (dump + log line).
+
+- **16. DECIDED (user, 2026-10-22): soft core, Feather px** (default 2, 0 = the hard core of
+  15). The hard core aliased: its edge is a pixel staircase, and where it crosses a grey area
+  (t36's side face) it left a jagged step up to 0.47 between neighbours. Now out = max(in,
+  smoothstep((D − Depth) / Feather)) where D > Depth; D = min over pixels q below Edge At of
+  |p − q| − s(q), s = how far the Edge At contour lies beyond q's centre (per axis t by linear
+  interpolation towards the above 4-neighbours, s = 1/√Σ1/t²). D ≤ the grid distance, so the
+  outer Depth px stay untouched; never darker. **Why sub-pixel:** a ramp on the plain grid
+  distance spread the step but its error stayed ~0.15 (the step itself); refined 0.02–0.08
+  (test, three slants; visibly smoother on t36). `ops/morphology` `distanceWithin` stamps
+  a disc of r + 1 on boundary pixels (exact); its fallback when stamping costs more than a
+  frame (large Depth on a noisy matte; t36 hits it only at Edge At 0.95) is the plain grid
+  distance, so there the edge is less smooth. Measured UHD: BFD 27 ms (hard 18), akflame5 37
+  ms (hard 36), M1 Ultra 27 ms. Saved 0.1.1 nodes get Feather 2 (slightly softer core edge).
 
 ### Operation 3: Edge Refine (roadmap)
 
@@ -168,7 +182,11 @@ BSD), copied from LTX's vendored copy.
 ### Platforms
 
 - **13. DECIDED (user, 2026-10-21): Rocky 9 today, macOS next.** The ops stay portable (no
-  Linux-only calls); the Mac bundle, its build script and its test are a follow-up.
+  Linux-only calls). Built 2026-10-22 (0.1.2): `scripts/build_mac.sh` (as LTX's), bundle
+  `Contents/MacOS/MatteRefine.ofx` (arm64) + generated `Info.plist`, exports via the vendored
+  `osxSymbols`, links only libc++/libSystem; `CMAKE_OSX_DEPLOYMENT_TARGET` 15.0 (else the build
+  Mac's version: minos 26); ctest 3/3 on an M1 Ultra. Install dir `/Library/OFX/Plugins`.
+  NOT yet tried in Flame on a Mac; no release package script for it yet.
 
 ## Flame host behaviour (from LTX `ofx/CLAUDE.md`, verified there on Flame 2027.1/2027.2)
 
@@ -191,7 +209,7 @@ BSD), copied from LTX's vendored copy.
 
 **Planned layout (tab 1):** Matte (Matte From 2, View 2, Version label 1) · Fill Holes (Enable,
 Threshold, Max Hole %, Bridge Gaps, Rim) · Fill Holes Edges (4 booleans) · Solid Core (Enable,
-Depth px, Edge At) · Support (Debug Logging, Collect Logs, Save Matte). Five columns; one left
+Depth px, Feather px, Edge At) · Support (Debug Logging, Collect Logs, Save Matte). Five columns; one left
 before tab 2.
 
 ## Logging and support (LTX decision 39, scaled down)
@@ -213,9 +231,14 @@ before tab 2.
 
 - Linux release builds on the Rocky 9 build host (`HOST=<host> scripts/build_remote.sh`); local
   test builds on any Linux with `cmake -S . -B <build>` (not loadable in Flame: newer glibc).
-- **Unit tests (ctest, 3):** `solid_core`: core white, edge band and a gap's margin untouched,
-  thin strip untouched, frame border not an edge, 30 random cases against brute force (both
-  dilation paths), UHD timing; a halved-depth mutation fails it.
+  Mac: `HOST=<mac> REMOTE=<folder> CMAKE=<cmake> CMAKE_ARGS=... scripts/build_mac.sh` (on macOS
+  26 pass `-DCMAKE_OSX_SYSROOT=<CLT>/SDKs/MacOSX.sdk` and `-stdlib++-isystem <SDK>/usr/include/c++/v1`
+  in `CMAKE_CXX_FLAGS`, as LTX).
+- **Unit tests (ctest, 3):** `solid_core`: core white, edge band and a gap's margin untouched
+  (hard and soft), thin strip untouched, frame border not an edge, 30 random cases against brute
+  force, hard and soft (both paths each), aliasing on slanted antialiased edges (soft < 0.09 off
+  the ideal, hard > 0.14: the test sees the staircase), UHD timing; a halved-depth mutation
+  fails it.
   `fill_holes` on synthetic mattes: simple hole, outer soft edge
   bit-identical, Max Hole % at the limit, diagonal seal, closed frame edges, bridged gap vs outer
   notch, a hole swallowed by the closing, rim distance, never lowers a pixel (noise), in place,
@@ -246,7 +269,7 @@ before tab 2.
   machine (`~/.cache/matte-refine/analyze/`, size-capped), never uploaded; Collect Logs
   includes only the parameter records, not the mattes, unless the user adds them.
 
-- Operation 2, Edge Refine (decision 12). macOS bundle (13).
+- Operation 3, Edge Refine (decision 12). macOS: a Flame test and `package_release_mac.sh` (13).
 - Not planned (14): a matte cache, a Process button.
 - Later, if needed: user-settable op order; a temporal option for Fill Holes (a hole crossing
   Max Hole % between frames can flicker).

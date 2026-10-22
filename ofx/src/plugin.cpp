@@ -59,6 +59,7 @@ constexpr const char* kPFhClosedBottom = "fhClosedBottom";
 constexpr const char* kPScEnable = "scEnable";
 constexpr const char* kPScDepth = "scDepth";
 constexpr const char* kPScEdgeAt = "scEdgeAt";
+constexpr const char* kPScFeather = "scFeather";
 constexpr const char* kPDebugLog = "debugLog";
 constexpr const char* kPCollectLogs = "collectLogs";
 constexpr const char* kPSaveMatte = "saveMatte";
@@ -148,6 +149,7 @@ class MatteRefineEffect : public OFX::ImageEffect {
     scEnable_ = fetchBooleanParam(kPScEnable);
     scDepth_ = fetchDoubleParam(kPScDepth);
     scEdgeAt_ = fetchDoubleParam(kPScEdgeAt);
+    scFeather_ = fetchDoubleParam(kPScFeather);
     debugLog_ = fetchBooleanParam(kPDebugLog);
     OFX::StringParam* nodeIdParam = fetchStringParam(kPNodeId);
     try {
@@ -284,12 +286,14 @@ class MatteRefineEffect : public OFX::ImageEffect {
       SolidCoreParams p;
       p.depthPx = scDepth_->getValueAtTime(args.time) * args.renderScale.x;  // decision 6
       p.edgeAt = float(scEdgeAt_->getValueAtTime(args.time));
+      p.featherPx = scFeather_->getValueAtTime(args.time) * args.renderScale.x;
       SolidCoreStats st;
       const auto c0 = std::chrono::steady_clock::now();
       solidCore(result.data(), result.data(), w, h, p, &st);
       char b[160];
-      std::snprintf(b, sizeof b, " solidCore [depth=%.3g edge=%.3g] %.1f ms (%lld px changed)",
-                    p.depthPx, p.edgeAt,
+      std::snprintf(b, sizeof b,
+                    " solidCore [depth=%.3g feather=%.3g edge=%.3g] %.1f ms (%lld px changed)",
+                    p.depthPx, p.featherPx, p.edgeAt,
                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - c0).count(),
                     st.pixelsChanged);
       opLog += b;
@@ -423,6 +427,7 @@ class MatteRefineEffect : public OFX::ImageEffect {
   OFX::BooleanParam* scEnable_;
   OFX::DoubleParam* scDepth_;
   OFX::DoubleParam* scEdgeAt_;
+  OFX::DoubleParam* scFeather_;
   OFX::BooleanParam* debugLog_;
   std::string nodeId_;
   bool inChangedParam_ = false;
@@ -561,7 +566,7 @@ class MatteRefineFactory : public OFX::PluginFactoryHelper<MatteRefineFactory> {
     boolean(kPFhClosedTop, "Top Closed", edgeHint, false, gEdges);
     boolean(kPFhClosedBottom, "Bottom Closed", edgeHint, false, gEdges);
 
-    // --- Solid Core (3 rows; decision 15) ---
+    // --- Solid Core (4 rows; decisions 15, 16) ---
     auto* gSc = group("grpSolidCore", "Solid Core");
     boolean(kPScEnable, "Enable",
             "Make everything deeper than Depth inside the matte solid white; the outer Depth "
@@ -571,6 +576,10 @@ class MatteRefineFactory : public OFX::PluginFactoryHelper<MatteRefineFactory> {
            "The core starts this many pixels inside the edge. Smaller = more of the soft edge "
            "becomes solid.",
            6.0, 200.0, 50.0, 1, 0.5, gSc);
+    number(kPScFeather, "Feather px",
+           "The core fades in over this many pixels after Depth, so its edge is smooth. 0 = a "
+           "hard core.",
+           2.0, 50.0, 10.0, 1, 0.5, gSc);
     // Not 0: nothing is below 0, so the whole frame would be core and turn white (Flame test 3).
     number(kPScEdgeAt, "Edge At", "The matte value where the edge is measured from.", 0.5, 1.0,
            1.0, 3, 0.01, gSc)

@@ -1,4 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
+# macOS: the oldest macOS the bundle loads on (decision 13); without it, the build Mac's own
+# version (minos 26 on macOS 26). 15.0 = what LTX Alpha Gen's Mac bundles carry. Before project().
+set(CMAKE_OSX_DEPLOYMENT_TARGET "15.0" CACHE STRING "Oldest macOS the bundle loads on")
 project(MatteRefineOFX LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 14)  # OFX 1.4 Support uses throw() specs and auto_ptr
@@ -9,9 +12,9 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # Release version (0.1.0 = Fill Holes; 0.1.1 = Solid Core, View Matte default, Solid Above
-# 0.95, decimals, Save Matte, diagnostics). Also the OFX plugin version (major.minor) and the
+# 0.95, decimals, Save Matte, diagnostics; 0.1.2 = soft Solid Core (Feather px), macOS). Also the OFX plugin version (major.minor) and the
 # release package name.
-set(MR_VERSION "0.1.1")
+set(MR_VERSION "0.1.2")
 string(REPLACE "." ";" MR_VERSION_PARTS "${MR_VERSION}")
 list(GET MR_VERSION_PARTS 0 MR_VERSION_MAJOR)
 list(GET MR_VERSION_PARTS 1 MR_VERSION_MINOR)
@@ -42,11 +45,14 @@ add_library(ofx_support STATIC
 target_include_directories(ofx_support PUBLIC ${OFX_DIR}/include ${OFX_DIR}/Support/include)
 target_compile_options(ofx_support PRIVATE -w -fvisibility=hidden)
 
-# OS-specific sources behind ofx/src/platform.h and the bundle's binary folder. macOS:
-# decision 13, next.
+# OS-specific sources behind ofx/src/platform.h and the bundle's binary folder (OFX:
+# Linux-x86-64; MacOS, as the installed Mac plugins and LTX Alpha Gen use). macOS: decision 13.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set(MR_PLATFORM_SOURCES ofx/src/platform_linux.cpp)
   set(MR_ARCH_DIR Linux-x86-64)
+elseif(APPLE)
+  set(MR_PLATFORM_SOURCES ofx/src/platform_macos.cpp)
+  set(MR_ARCH_DIR MacOS)
 else()
   message(FATAL_ERROR "No platform layer for ${CMAKE_SYSTEM_NAME} yet (ofx/src/platform.h)")
 endif()
@@ -72,8 +78,29 @@ target_compile_options(${BUNDLE_NAME} PRIVATE -Wall -Wextra -Wno-deprecated-decl
   -fvisibility=hidden)
 # Export only the two OFX entry points. libstdc++ is linked dynamically: Flame uses the system
 # /lib64/libstdc++.so.6 (GCC 11), so building with Rocky 9's GCC 11 matches the host exactly.
-target_link_options(${BUNDLE_NAME} PRIVATE
-  -Wl,--version-script=${OFX_DIR}/Support/include/linuxSymbols -Wl,--no-undefined)
+# macOS: the vendored osxSymbols list; ld's default for undefined symbols is already "error".
+if(APPLE)
+  target_link_options(${BUNDLE_NAME} PRIVATE
+    -Wl,-exported_symbols_list,${OFX_DIR}/Support/include/osxSymbols)
+  # Minimal bundle description, as most installed Mac OFX bundles carry one.
+  file(WRITE ${BUNDLE_DIR}/Contents/Info.plist
+"<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
+<plist version=\"1.0\">
+<dict>
+  <key>CFBundleExecutable</key><string>${BUNDLE_NAME}.ofx</string>
+  <key>CFBundleIdentifier</key><string>com.janklier.matterefine</string>
+  <key>CFBundleName</key><string>Matte Refine</string>
+  <key>CFBundlePackageType</key><string>BNDL</string>
+  <key>CFBundleVersion</key><string>${MR_VERSION}</string>
+  <key>CFBundleShortVersionString</key><string>${MR_VERSION}</string>
+</dict>
+</plist>
+")
+else()
+  target_link_options(${BUNDLE_NAME} PRIVATE
+    -Wl,--version-script=${OFX_DIR}/Support/include/linuxSymbols -Wl,--no-undefined)
+endif()
 set_target_properties(${BUNDLE_NAME} PROPERTIES
   PREFIX "" SUFFIX ".ofx"
   LIBRARY_OUTPUT_DIRECTORY ${BUNDLE_DIR}/Contents/${MR_ARCH_DIR})

@@ -1,5 +1,6 @@
-// Operation 2, Solid Core (CLAUDE.md decision 15): every pixel more than Depth px inside the
-// matte's Edge At contour becomes 1.0; the outer Depth px of edge are not touched.
+// Operation 2, Solid Core (CLAUDE.md decisions 15, 16): every pixel more than Depth + Feather px
+// inside the matte's Edge At contour becomes 1.0, with a smooth ramp over the Feather px before
+// it; the outer Depth px of edge are not touched and no pixel gets darker.
 #pragma once
 
 namespace mr {
@@ -7,6 +8,7 @@ namespace mr {
 struct SolidCoreParams {
   double depthPx = 6.0;  // core starts this far inside the edge
   float edgeAt = 0.5f;   // the contour the depth is measured from
+  double featherPx = 2.0;  // ramp from the input to 1.0 over this many px; 0 = a hard core
 };
 
 struct SolidCoreStats {
