@@ -12,9 +12,9 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # Release version (0.1.0 = Fill Holes; 0.1.1 = Solid Core, View Matte default, Solid Above
-# 0.95, decimals, Save Matte, diagnostics; 0.1.2 = soft Solid Core (Feather px), macOS). Also the OFX plugin version (major.minor) and the
+# 0.95, decimals, Save Matte, diagnostics; 0.1.2 = soft Solid Core (Feather px), macOS; 0.2.0 = Clean & Crush, Contour Smooth, Shrink/Grow, Edge Width, Snap to Image, Foreground Colour, QC views, matte on source alpha). Also the OFX plugin version (major.minor) and the
 # release package name.
-set(MR_VERSION "0.1.2")
+set(MR_VERSION "0.2.0")
 string(REPLACE "." ";" MR_VERSION_PARTS "${MR_VERSION}")
 list(GET MR_VERSION_PARTS 0 MR_VERSION_MAJOR)
 list(GET MR_VERSION_PARTS 1 MR_VERSION_MINOR)
@@ -58,8 +58,10 @@ else()
 endif()
 
 # The operations: pure logic, shared with the unit tests (decision 3).
-add_library(mr_ops STATIC ofx/src/ops/morphology.cpp ofx/src/ops/fill_holes.cpp
-  ofx/src/ops/solid_core.cpp)
+add_library(mr_ops STATIC ofx/src/ops/morphology.cpp ofx/src/ops/edge_field.cpp
+  ofx/src/ops/fill_holes.cpp ofx/src/ops/solid_core.cpp ofx/src/ops/snap_to_image.cpp
+  ofx/src/ops/foreground_colour.cpp ofx/src/ops/clean_background.cpp
+  ofx/src/ops/contour_smooth.cpp ofx/src/ops/shrink_grow.cpp ofx/src/ops/edge_width.cpp)
 target_include_directories(mr_ops PUBLIC ofx/src)
 target_compile_options(mr_ops PRIVATE -Wall -Wextra -fvisibility=hidden)
 target_link_libraries(mr_ops PUBLIC Threads::Threads)
@@ -105,6 +107,13 @@ set_target_properties(${BUNDLE_NAME} PROPERTIES
   PREFIX "" SUFFIX ".ofx"
   LIBRARY_OUTPUT_DIRECTORY ${BUNDLE_DIR}/Contents/${MR_ARCH_DIR})
 
+# Synthetic test mattes (CLAUDE.md "Synthetic mattes"): the unit tests use them in memory,
+# mr_synth writes them as EXR for evaluation and demos in Flame.
+add_library(mr_synth_lib STATIC ofx/tools/synth.cpp)
+target_include_directories(mr_synth_lib PUBLIC ofx/tools)
+add_executable(mr_synth ofx/tools/mr_synth.cpp)
+target_link_libraries(mr_synth PRIVATE mr_synth_lib)
+
 enable_testing()
 add_executable(test_fill_holes ofx/tests/test_fill_holes.cpp)
 target_link_libraries(test_fill_holes PRIVATE mr_ops)
@@ -112,6 +121,30 @@ add_test(NAME fill_holes COMMAND test_fill_holes)
 add_executable(test_solid_core ofx/tests/test_solid_core.cpp)
 target_link_libraries(test_solid_core PRIVATE mr_ops)
 add_test(NAME solid_core COMMAND test_solid_core)
+add_executable(test_edge_field ofx/tests/test_edge_field.cpp)
+target_link_libraries(test_edge_field PRIVATE mr_ops)
+add_test(NAME edge_field COMMAND test_edge_field)
+add_executable(test_synth ofx/tests/test_synth.cpp)
+target_link_libraries(test_synth PRIVATE mr_synth_lib)
+add_test(NAME synth COMMAND test_synth ${CMAKE_BINARY_DIR})
+add_executable(test_snap_to_image ofx/tests/test_snap_to_image.cpp)
+target_link_libraries(test_snap_to_image PRIVATE mr_ops mr_synth_lib)
+add_test(NAME snap_to_image COMMAND test_snap_to_image)
+add_executable(test_foreground_colour ofx/tests/test_foreground_colour.cpp)
+target_link_libraries(test_foreground_colour PRIVATE mr_ops mr_synth_lib)
+add_test(NAME foreground_colour COMMAND test_foreground_colour)
+add_executable(test_clean_background ofx/tests/test_clean_background.cpp)
+target_link_libraries(test_clean_background PRIVATE mr_ops mr_synth_lib)
+add_test(NAME clean_background COMMAND test_clean_background)
+add_executable(test_contour_smooth ofx/tests/test_contour_smooth.cpp)
+target_link_libraries(test_contour_smooth PRIVATE mr_ops mr_synth_lib)
+add_test(NAME contour_smooth COMMAND test_contour_smooth)
+add_executable(test_shrink_grow ofx/tests/test_shrink_grow.cpp)
+target_link_libraries(test_shrink_grow PRIVATE mr_ops mr_synth_lib)
+add_test(NAME shrink_grow COMMAND test_shrink_grow)
+add_executable(test_edge_width ofx/tests/test_edge_width.cpp)
+target_link_libraries(test_edge_width PRIVATE mr_ops mr_synth_lib)
+add_test(NAME edge_width COMMAND test_edge_width)
 
 add_executable(test_load_bundle ofx/tests/test_load_bundle.cpp)
 target_include_directories(test_load_bundle PRIVATE ${OFX_DIR}/include)

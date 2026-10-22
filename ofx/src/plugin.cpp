@@ -1,6 +1,7 @@
 // Matte Refine OFX (CLAUDE.md): one node, matte operations as sections (decision 1), all
 // rendered inline in render(), no cache, no Process button (decision 14).
-// - Matte From picks the input matte (decision 4); enabled ops run in a fixed order (3).
+// - The matte comes from the source alpha, Flame's matte input (decision 4); enabled ops run in a
+//   fixed order (3).
 // - Output: RGB = source (or the Show Filled view, 11), alpha = the refined matte.
 // - Layout follows Flame's rules: one group = one column of <= 5 rows (CLAUDE.md "Flame host").
 
@@ -22,7 +23,14 @@
 #include "env_info.h"
 #include "log.h"
 #include "ofxsImageEffect.h"
+#include "ops/clean_background.h"
+#include "ops/contour_smooth.h"
+#include "ops/edge_field.h"
+#include "ops/edge_width.h"
 #include "ops/fill_holes.h"
+#include "ops/foreground_colour.h"
+#include "ops/shrink_grow.h"
+#include "ops/snap_to_image.h"
 #include "ops/solid_core.h"
 #include "process.h"
 #include "user_config.h"
@@ -44,8 +52,10 @@ using namespace mr;
 
 constexpr const char* kPluginId = "com.janklier.matterefine";
 constexpr const char* kPluginLabel = "Matte Refine";
+// Decision 22: the matte's own input (a mask clip; Flame shows it as an extra socket). The
+// picture on Source is optional; without a Matte input the matte is Source's alpha.
+constexpr const char* kMatteClip = "Matte";
 
-constexpr const char* kPMatteFrom = "matteFrom";
 constexpr const char* kPView = "view";
 constexpr const char* kPFhEnable = "fhEnable";
 constexpr const char* kPFhThreshold = "fhThreshold";
@@ -60,17 +70,39 @@ constexpr const char* kPScEnable = "scEnable";
 constexpr const char* kPScDepth = "scDepth";
 constexpr const char* kPScEdgeAt = "scEdgeAt";
 constexpr const char* kPScFeather = "scFeather";
+constexpr const char* kPCbEnable = "cbEnable";
+constexpr const char* kPCbMaxIsland = "cbMaxIsland";
+constexpr const char* kPCbBelow = "cbBackgroundBelow";
+constexpr const char* kPCbCrush = "cbCrush";
+constexpr const char* kPCbFeather = "cbCrushFeather";
+constexpr const char* kPCsEnable = "csEnable";
+constexpr const char* kPCsSmooth = "csSmooth";
+constexpr const char* kPCsMaxShift = "csMaxShift";
+constexpr const char* kPCsCorner = "csCorner";
+constexpr const char* kPCsEdgeAt = "csEdgeAt";
+constexpr const char* kPSgEnable = "sgEnable";
+constexpr const char* kPSgAmount = "sgAmount";
+constexpr const char* kPEwEnable = "ewEnable";
+constexpr const char* kPEwWidth = "ewWidth";
+constexpr const char* kPEwMix = "ewMix";
+constexpr const char* kPSnEnable = "snEnable";
+constexpr const char* kPSnRadius = "snRadius";
+constexpr const char* kPSnBand = "snBand";
+constexpr const char* kPSnDetail = "snDetail";
+constexpr const char* kPSnFromPicture = "snFromPicture";
+constexpr const char* kPFgEnable = "fgEnable";
+constexpr const char* kPFgSmoothness = "fgSmoothness";
+constexpr const char* kPFgExtend = "fgExtend";
+constexpr const char* kPFgMix = "fgMix";
 constexpr const char* kPDebugLog = "debugLog";
 constexpr const char* kPCollectLogs = "collectLogs";
 constexpr const char* kPSaveMatte = "saveMatte";
 constexpr const char* kPNodeId = "nodeId";
 
-// Stored as indexes in setups: append only.
-enum MatteFrom { kFromAlpha = 0, kFromLuminance = 1, kFromRed = 2 };
-const char* const kMatteFromNames[] = {"Alpha", "Luminance", "Red"};
-// Index 0 was "Result" (= source) in the first build: kept as Source so saved nodes don't change.
-enum View { kViewSource = 0, kViewShowFilled = 1, kViewMatte = 2 };
-const char* const kViewNames[] = {"Source", "Show Filled", "Matte"};
+// Stored as indexes in setups: append only. 0 was "Result", then "Source" (the front input);
+// 1 was "Show Filled" (raised pixels only).
+enum View { kViewPicture = 0, kViewShowChanges = 1, kViewMatte = 2, kViewTrimap = 3, kViewGreyInside = 4 };
+const char* const kViewNames[] = {"Picture", "Show Changes", "Matte", "Trimap", "Grey Inside"};
 
 std::string homeDir() {
   const char* h = std::getenv("HOME");
@@ -111,7 +143,7 @@ int componentCount(OFX::PixelComponentEnum c) {
 float clamp01(float v) { return v > 0.0f ? (v < 1.0f ? v : 1.0f) : 0.0f; }  // NaN -> 0
 
 // The input matte (decision 4), top-down (OFX rows are bottom-up), clamped to 0-1 (decision 5).
-std::vector<float> extractMatte(const OFX::Image& src, int from) {
+std::vector<float> extractMatte(const OFX::Image& src, bool rgbIsMatte = false) {
   const OfxRectI sb = src.getBounds();
   const int w = sb.x2 - sb.x1, h = sb.y2 - sb.y1, sc = componentCount(src.getPixelComponents());
   std::vector<float> matte(size_t(w) * h);
@@ -119,15 +151,28 @@ std::vector<float> extractMatte(const OFX::Image& src, int from) {
     const auto* p = static_cast<const float*>(src.getPixelAddress(sb.x1, y));
     float* m = &matte[size_t(sb.y2 - 1 - y) * w];
     for (int x = 0; x < w; ++x, p += sc) {
-      float v;
-      if (sc == 1) v = p[0];
-      else if (from == kFromLuminance) v = 0.2126f * p[0] + 0.7152f * p[1] + 0.0722f * p[2];
-      else if (from == kFromRed) v = p[0];
-      else v = sc == 4 ? p[3] : 1.0f;
-      m[x] = clamp01(v);
+      m[x] = clamp01(sc == 1 ? p[0] : sc == 4 ? p[3] : rgbIsMatte ? p[0] : 1.0f);
     }
   }
   return matte;
+}
+
+// The picture (the front input), top-down, w*h*3 (decision 4): for Snap to Image and
+// Foreground Colour.
+std::vector<float> extractRgb(const OFX::Image& src) {
+  const OfxRectI sb = src.getBounds();
+  const int w = sb.x2 - sb.x1, h = sb.y2 - sb.y1, sc = componentCount(src.getPixelComponents());
+  std::vector<float> rgb(size_t(w) * h * 3);
+  for (int y = sb.y1; y < sb.y2; ++y) {
+    const auto* p = static_cast<const float*>(src.getPixelAddress(sb.x1, y));
+    float* q = &rgb[size_t(sb.y2 - 1 - y) * w * 3];
+    for (int x = 0; x < w; ++x, p += sc, q += 3) {
+      q[0] = p[0];
+      q[1] = sc >= 3 ? p[1] : p[0];
+      q[2] = sc >= 3 ? p[2] : p[0];
+    }
+  }
+  return rgb;
 }
 
 class MatteRefineEffect : public OFX::ImageEffect {
@@ -135,7 +180,7 @@ class MatteRefineEffect : public OFX::ImageEffect {
   explicit MatteRefineEffect(OfxImageEffectHandle handle) : ImageEffect(handle) {
     src_ = fetchClip(kOfxImageEffectSimpleSourceClipName);
     dst_ = fetchClip(kOfxImageEffectOutputClipName);
-    matteFrom_ = fetchChoiceParam(kPMatteFrom);
+    matteClip_ = fetchClip(kMatteClip);
     view_ = fetchChoiceParam(kPView);
     fhEnable_ = fetchBooleanParam(kPFhEnable);
     fhThreshold_ = fetchDoubleParam(kPFhThreshold);
@@ -150,6 +195,30 @@ class MatteRefineEffect : public OFX::ImageEffect {
     scDepth_ = fetchDoubleParam(kPScDepth);
     scEdgeAt_ = fetchDoubleParam(kPScEdgeAt);
     scFeather_ = fetchDoubleParam(kPScFeather);
+    cbEnable_ = fetchBooleanParam(kPCbEnable);
+    cbMaxIsland_ = fetchDoubleParam(kPCbMaxIsland);
+    cbBelow_ = fetchDoubleParam(kPCbBelow);
+    cbCrush_ = fetchDoubleParam(kPCbCrush);
+    cbFeather_ = fetchDoubleParam(kPCbFeather);
+    csEnable_ = fetchBooleanParam(kPCsEnable);
+    csSmooth_ = fetchDoubleParam(kPCsSmooth);
+    csMaxShift_ = fetchDoubleParam(kPCsMaxShift);
+    csCorner_ = fetchDoubleParam(kPCsCorner);
+    csEdgeAt_ = fetchDoubleParam(kPCsEdgeAt);
+    sgEnable_ = fetchBooleanParam(kPSgEnable);
+    sgAmount_ = fetchDoubleParam(kPSgAmount);
+    ewEnable_ = fetchBooleanParam(kPEwEnable);
+    ewWidth_ = fetchDoubleParam(kPEwWidth);
+    ewMix_ = fetchDoubleParam(kPEwMix);
+    snEnable_ = fetchBooleanParam(kPSnEnable);
+    snRadius_ = fetchDoubleParam(kPSnRadius);
+    snBand_ = fetchDoubleParam(kPSnBand);
+    snDetail_ = fetchDoubleParam(kPSnDetail);
+    snFromPicture_ = fetchDoubleParam(kPSnFromPicture);
+    fgEnable_ = fetchBooleanParam(kPFgEnable);
+    fgSmoothness_ = fetchDoubleParam(kPFgSmoothness);
+    fgExtend_ = fetchDoubleParam(kPFgExtend);
+    fgMix_ = fetchDoubleParam(kPFgMix);
     debugLog_ = fetchBooleanParam(kPDebugLog);
     OFX::StringParam* nodeIdParam = fetchStringParam(kPNodeId);
     try {
@@ -174,6 +243,15 @@ class MatteRefineEffect : public OFX::ImageEffect {
   void getClipPreferences(OFX::ClipPreferencesSetter& prefs) override {
     // Alpha carries the result, also for an RGB source (Flame forces RGBA anyway).
     prefs.setClipComponents(*dst_, OFX::ePixelComponentRGBA);
+    if (!src_->isConnected() && matteClip_->isConnected())
+      prefs.setPixelAspectRatio(*dst_, matteClip_->getPixelAspectRatio());
+  }
+
+  // The output's size follows the matte (decision 22), so the picture can stay unconnected.
+  bool getRegionOfDefinition(const OFX::RegionOfDefinitionArguments& args, OfxRectD& rod) override {
+    if (!matteClip_->isConnected()) return false;
+    rod = matteClip_->getRegionOfDefinition(args.time);
+    return true;
   }
 
   void changedParam(const OFX::InstanceChangedArgs& args, const std::string& name) override {
@@ -211,31 +289,45 @@ class MatteRefineEffect : public OFX::ImageEffect {
       LOGE("render t=%g: host returned no output image", args.time);
       OFX::throwSuiteStatusException(kOfxStatFailed);
     }
-    std::unique_ptr<OFX::Image> src(src_->fetchImage(args.time));
+    // Decision 22: matte from the Matte input, else Source's alpha; the picture (Source) is
+    // optional and used only when it matches the matte's size.
     std::string warning;
-    if (!src) {
-      warning = "No source image (is the input connected?).";
-    } else if (src->getPixelDepth() != OFX::eBitDepthFloat) {
-      warning = "Only 32-bit float images are supported.";
+    auto fetch = [&](OFX::Clip* c) {
+      std::unique_ptr<OFX::Image> img(c->isConnected() ? c->fetchImage(args.time) : nullptr);
+      if (img && img->getPixelDepth() != OFX::eBitDepthFloat) {
+        warning = "Only 32-bit float images are supported.";
+        img.reset();
+      }
+      return img;
+    };
+    std::unique_ptr<OFX::Image> src = fetch(src_), matteImg = fetch(matteClip_);
+    const OFX::Image* mi = matteImg ? matteImg.get() : src.get();
+    if (!mi && warning.empty()) warning = "No matte: connect the matte to the Matte input.";
+
+    const OfxRectI sb = mi ? mi->getBounds() : out->getBounds();
+    const int w = sb.x2 - sb.x1, h = sb.y2 - sb.y1;
+    const OfxRectI pb = src ? src->getBounds() : sb;
+    if (matteImg && src && (pb.x1 != sb.x1 || pb.x2 != sb.x2 || pb.y1 != sb.y1 || pb.y2 != sb.y2)) {
+      warning = "The picture and the matte differ in size: the picture is not used.";
       src.reset();
     }
-
-    const OfxRectI sb = src ? src->getBounds() : out->getBounds();
-    const int w = sb.x2 - sb.x1, h = sb.y2 - sb.y1;
     const int sc = src ? componentCount(src->getPixelComponents()) : 0;
-    int from = kFromAlpha, view = kViewMatte;
-    matteFrom_->getValueAtTime(args.time, from);
+    int view = kViewPicture;
     view_->getValueAtTime(args.time, view);
-    if (src && from == kFromAlpha && sc == 3) warning = "The source has no alpha: Matte From is Alpha.";
+    if (!matteImg && src && sc == 3)
+      warning = "No matte: connect the matte to the Matte input.";
 
-    std::vector<float> matte = src ? extractMatte(*src, from) : std::vector<float>(size_t(w) * h, 0.0f);
+    std::vector<float> matte =
+        mi ? extractMatte(*mi, mi == matteImg.get()) : std::vector<float>(size_t(w) * h, 0.0f);
     std::string inLog;  // what actually arrived
-    if (src && !matte.empty()) {
+    if (mi && !matte.empty()) {
       const auto mm = std::minmax_element(matte.begin(), matte.end());
       if (*mm.first == *mm.second && warning.empty()) {
         char b[160];
-        std::snprintf(b, sizeof b, "The input matte (%s) is constant %.2f: is the matte connected?",
-                      kMatteFromNames[std::min(std::max(from, 0), 2)], *mm.first);
+        // Flame delivers alpha 1.0 when nothing is on the source alpha input (probe, 2026-10-22).
+        std::snprintf(b, sizeof b,
+                      "The input matte is constant %.2f: connect the matte to the Matte input.",
+                      *mm.first);
         warning = b;
       }
       if (logEnabled(LogLevel::Debug)) {
@@ -252,9 +344,35 @@ class MatteRefineEffect : public OFX::ImageEffect {
     // The operations, in their fixed order (decision 3).
     std::vector<float> result = matte;
     std::string opLog;
+    const double scale = args.renderScale.x;  // pixel params scale (decision 6)
+    auto on = [&](OFX::BooleanParam* b) {
+      bool v = false;
+      b->getValueAtTime(args.time, v);
+      return mi && v;
+    };
+    auto val = [&](OFX::DoubleParam* d) { return d->getValueAtTime(args.time); };
+    auto since = [](std::chrono::steady_clock::time_point t) {
+      return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();
+    };
+    if (on(cbEnable_)) {
+      CleanBackgroundParams p;
+      p.maxIslandPercent = val(cbMaxIsland_);
+      p.backgroundBelow = float(val(cbBelow_));
+      p.crushPx = val(cbCrush_) * scale;
+      p.featherPx = val(cbFeather_) * scale;
+      p.fringePx *= scale;
+      CleanBackgroundStats st;
+      const auto c0 = std::chrono::steady_clock::now();
+      cleanBackground(result.data(), result.data(), w, h, p, &st);
+      char b[200];
+      std::snprintf(b, sizeof b, " clean [island=%.3g%% below=%.3g crush=%.3g/%.3g] %.1f ms (%d islands, %lld px removed, %lld crushed)",
+                    p.maxIslandPercent, p.backgroundBelow, p.crushPx, p.featherPx, since(c0),
+                    st.islandsRemoved, st.pixelsRemoved, st.pixelsCrushed);
+      opLog += b;
+    }
     bool fhOn = true;
     fhEnable_->getValueAtTime(args.time, fhOn);
-    if (src && fhOn) {
+    if (mi && fhOn) {
       FillHolesParams p;
       p.threshold = float(fhThreshold_->getValueAtTime(args.time));
       p.maxHolePercent = fhMaxHole_->getValueAtTime(args.time);
@@ -266,7 +384,7 @@ class MatteRefineEffect : public OFX::ImageEffect {
       p.closedBottom = fhClosedBottom_->getValueAtTime(args.time);
       FillHolesStats st;
       const auto f0 = std::chrono::steady_clock::now();
-      fillHoles(matte.data(), result.data(), w, h, p, &st);
+      fillHoles(result.data(), result.data(), w, h, p, &st);
       char b[400];
       std::snprintf(b, sizeof b,
                     " fillHoles [thr=%.3g max=%.3g%% bridge=%.3g rim=%.3g closed=%s%s%s%s] %.1f ms "
@@ -282,7 +400,7 @@ class MatteRefineEffect : public OFX::ImageEffect {
     }
     bool scOn = false;
     scEnable_->getValueAtTime(args.time, scOn);
-    if (src && scOn) {
+    if (mi && scOn) {
       SolidCoreParams p;
       p.depthPx = scDepth_->getValueAtTime(args.time) * args.renderScale.x;  // decision 6
       p.edgeAt = float(scEdgeAt_->getValueAtTime(args.time));
@@ -298,8 +416,87 @@ class MatteRefineEffect : public OFX::ImageEffect {
                     st.pixelsChanged);
       opLog += b;
     }
+    if (on(csEnable_)) {
+      ContourSmoothParams p;
+      p.smoothPx = val(csSmooth_) * scale;
+      p.maxShiftPx = val(csMaxShift_) * scale;
+      p.cornerDeg = val(csCorner_);
+      p.edgeAt = float(val(csEdgeAt_));
+      ContourSmoothStats st;
+      const auto c0 = std::chrono::steady_clock::now();
+      contourSmooth(result.data(), result.data(), w, h, p, &st);
+      char b[200];
+      std::snprintf(b, sizeof b, " smooth [%.3g px, max %.3g, corner %.3g, edge %.3g] %.1f ms (%lld px changed%s)",
+                    p.smoothPx, p.maxShiftPx, p.cornerDeg, p.edgeAt, since(c0), st.pixelsChanged,
+                    st.skipped ? ", SKIPPED: noisy matte" : "");
+      opLog += b;
+    }
+    if (on(sgEnable_)) {
+      ShrinkGrowParams p;
+      p.amountPx = val(sgAmount_) * scale;
+      ShrinkGrowStats st;
+      const auto c0 = std::chrono::steady_clock::now();
+      shrinkGrow(result.data(), result.data(), w, h, p, &st);
+      char b[160];
+      std::snprintf(b, sizeof b, " shrinkGrow [%.3g px] %.1f ms (%d passes, %lld px changed)",
+                    p.amountPx, since(c0), st.passes, st.pixelsChanged);
+      opLog += b;
+    }
+    if (on(ewEnable_)) {
+      EdgeWidthParams p;
+      p.widthPx = val(ewWidth_) * scale;
+      p.amount = val(ewMix_);
+      EdgeWidthStats st;
+      const auto c0 = std::chrono::steady_clock::now();
+      edgeWidth(result.data(), result.data(), w, h, p, &st);
+      char b[160];
+      std::snprintf(b, sizeof b, " edgeWidth [%.3g px, mix %.3g] %.1f ms (%lld px changed)",
+                    p.widthPx, p.amount, since(c0), st.pixelsChanged);
+      opLog += b;
+    }
+    bool snOn = on(snEnable_), fgOn = on(fgEnable_);
+    if ((snOn || fgOn) && !src) {
+      if (warning.empty())
+        warning = "Snap to Image and Foreground Colour need the picture on the front input.";
+      snOn = fgOn = false;
+    }
+    const std::vector<float> rgb = snOn || fgOn ? extractRgb(*src) : std::vector<float>();
+    if (snOn) {
+      SnapParams p;
+      p.radiusPx = val(snRadius_) * scale;
+      p.bandPx = val(snBand_) * scale;
+      p.detail = val(snDetail_);
+      p.fromPicture = val(snFromPicture_);
+      SnapStats st;
+      const auto c0 = std::chrono::steady_clock::now();
+      snapToImage(result.data(), rgb.data(), result.data(), w, h, p, &st);
+      char b[200];
+      std::snprintf(b, sizeof b, " snap [r %.3g, band %.3g, detail %.3g, picture %.3g] %.1f ms (%lld px changed, max %.3f)",
+                    p.radiusPx, p.bandPx, p.detail, p.fromPicture, since(c0), st.pixelsChanged, st.maxChange);
+      opLog += b;
+    }
+    // Foreground Colour changes the picture, not the matte: the Picture view shows it.
+    std::vector<float> fg;
+    if (fgOn) {
+      FgParams p;
+      p.smoothness = val(fgSmoothness_);
+      p.extendPx = val(fgExtend_) * scale;
+      p.mix = float(val(fgMix_));
+      FgStats st;
+      fg.resize(rgb.size());
+      const auto c0 = std::chrono::steady_clock::now();
+      foregroundColour(rgb.data(), result.data(), fg.data(), w, h, p, &st);
+      char b[160];
+      std::snprintf(b, sizeof b, " fgColour [smooth %.3g, extend %.3g, mix %.3g] %.1f ms (%lld edge px)",
+                    p.smoothness, p.extendPx, p.mix, since(c0), st.edgePixels);
+      opLog += b;
+    }
+    // Grey Inside: semi-transparent pixels more than 4 px inside the 0.5 contour.
+    const std::vector<float> sd = view == kViewGreyInside && mi
+                                      ? signedEdgeDistance(result.data(), w, h, 0.5f, 6.0)
+                                      : std::vector<float>();
 
-    // Output: RGB = source, or Show Filled (input matte grey, added fill magenta); A = result.
+    // Output (decision 11): RGB per View, A = the refined matte.
     const OfxRectI db = out->getBounds();
     const OfxRectI& win = args.renderWindow;
     const int dc = componentCount(dst_->getPixelComponents());
@@ -308,7 +505,7 @@ class MatteRefineEffect : public OFX::ImageEffect {
       const int row = sb.y2 - 1 - y;
       for (int x = std::max(win.x1, db.x1); x < std::min(win.x2, db.x2); ++x, px += dc) {
         const int col = x - sb.x1;
-        const bool inside = src && row >= 0 && row < h && col >= 0 && col < w;
+        const bool inside = mi && row >= 0 && row < h && col >= 0 && col < w;
         const size_t i = inside ? size_t(row) * w + col : 0;
         const float a = inside ? result[i] : 0.0f;
         if (dc == 1) {
@@ -317,12 +514,30 @@ class MatteRefineEffect : public OFX::ImageEffect {
         }
         if (!inside) {
           px[0] = px[1] = px[2] = 0.0f;
-        } else if (view == kViewShowFilled) {
+        } else if (view == kViewShowChanges) {
+          // The input matte in grey; raised pixels tinted magenta, lowered ones green.
           const float m = matte[i], d = a - m;
-          px[0] = px[2] = m * (1.0f - d) + d;
-          px[1] = m * (1.0f - d);
+          if (d >= 0.0f) {
+            px[0] = px[2] = m * (1.0f - d) + d;
+            px[1] = m * (1.0f - d);
+          } else {
+            px[0] = px[2] = a;
+            px[1] = std::min(1.0f, a - d);
+          }
         } else if (view == kViewMatte) {
           px[0] = px[1] = px[2] = a;
+        } else if (view == kViewTrimap) {
+          px[0] = px[1] = px[2] = a >= 0.98f ? 1.0f : a <= 0.02f ? 0.0f : 0.5f;
+        } else if (view == kViewGreyInside) {
+          const bool grey = a > 0.02f && a < 0.98f && sd[i] > 4.0f;
+          px[0] = grey ? 1.0f : a;
+          px[1] = px[2] = grey ? 0.15f : a;
+        } else if (!src) {  // Picture view without a picture: the refined matte
+          px[0] = px[1] = px[2] = a;
+        } else if (!fg.empty()) {
+          px[0] = fg[i * 3];
+          px[1] = fg[i * 3 + 1];
+          px[2] = fg[i * 3 + 2];
         } else {
           const auto* sp = static_cast<const float*>(src->getPixelAddress(x, y));
           px[0] = sp[0];
@@ -341,9 +556,8 @@ class MatteRefineEffect : public OFX::ImageEffect {
       LOGW("render: persistent message FAILED: %s", e.what());
     }
     const auto t2 = std::chrono::steady_clock::now();
-    LOGD("render t=%g %dx%d scale=%g from=%s view=%s:%s read %.1f ms,%s total %.1f ms%s%s",
-         args.time, w, h, args.renderScale.x, kMatteFromNames[std::min(std::max(from, 0), 2)],
-         kViewNames[std::min(std::max(view, 0), 2)], inLog.c_str(),
+    LOGD("render t=%g %dx%d scale=%g view=%s:%s read %.1f ms,%s total %.1f ms%s%s",
+         args.time, w, h, args.renderScale.x, kViewNames[std::min(std::max(view, 0), 4)], inLog.c_str(),
          std::chrono::duration<double, std::milli>(t1 - t0).count(), opLog.c_str(),
          std::chrono::duration<double, std::milli>(t2 - t0).count(), warning.empty() ? "" : " | ",
          warning.c_str());
@@ -353,14 +567,13 @@ class MatteRefineEffect : public OFX::ImageEffect {
   // Writes this frame's input matte (what the ops see) for offline analysis on this machine:
   // ~/.cache/matte-refine/dumps/<node>_t<time>.f32 (w*h floats, top row first) + .txt.
   void saveMatte(double time) {
-    std::unique_ptr<OFX::Image> src(src_->fetchImage(time));
+    const bool own = matteClip_->isConnected();
+    std::unique_ptr<OFX::Image> src((own ? matteClip_ : src_)->fetchImage(time));
     if (!src || src->getPixelDepth() != OFX::eBitDepthFloat) {
-      sendMessage(OFX::Message::eMessageError, "", "Save Matte: no 32-bit float source image.");
+      sendMessage(OFX::Message::eMessageError, "", "Save Matte: no 32-bit float matte.");
       return;
     }
-    int from = kFromAlpha;
-    matteFrom_->getValueAtTime(time, from);
-    const std::vector<float> matte = extractMatte(*src, from);
+    const std::vector<float> matte = extractMatte(*src, own);
     const OfxRectI b = src->getBounds();
     const std::string logs = logDir();
     const std::string dir = logs.substr(0, logs.rfind('/')) + "/dumps";
@@ -372,8 +585,8 @@ class MatteRefineEffect : public OFX::ImageEffect {
     raw.write(reinterpret_cast<const char*>(matte.data()), std::streamsize(matte.size() * sizeof(float)));
     std::ofstream txt(path + ".txt");
     txt << "width=" << (b.x2 - b.x1) << "\nheight=" << (b.y2 - b.y1)
-        << "\nformat=float32 little-endian, top row first, 0-1\nmatte_from="
-        << kMatteFromNames[std::min(std::max(from, 0), 2)] << "\ntime=" << time << "\n";
+        << "\nformat=float32 little-endian, top row first, 0-1\nmatte_from=" << (own ? "Matte input" : "source alpha")
+        << "\ntime=" << time << "\n";
     const bool ok = raw.good() && txt.good();
     LOGI("saveMatte t=%g %dx%d -> %s.f32 %s", time, b.x2 - b.x1, b.y2 - b.y1, path.c_str(),
          ok ? "ok" : "FAILED");
@@ -413,7 +626,7 @@ class MatteRefineEffect : public OFX::ImageEffect {
 
   OFX::Clip* src_;
   OFX::Clip* dst_;
-  OFX::ChoiceParam* matteFrom_;
+  OFX::Clip* matteClip_;
   OFX::ChoiceParam* view_;
   OFX::BooleanParam* fhEnable_;
   OFX::DoubleParam* fhThreshold_;
@@ -428,6 +641,13 @@ class MatteRefineEffect : public OFX::ImageEffect {
   OFX::DoubleParam* scDepth_;
   OFX::DoubleParam* scEdgeAt_;
   OFX::DoubleParam* scFeather_;
+  OFX::BooleanParam *cbEnable_, *csEnable_, *sgEnable_, *ewEnable_, *snEnable_, *fgEnable_;
+  OFX::DoubleParam *cbMaxIsland_, *cbBelow_, *cbCrush_, *cbFeather_;
+  OFX::DoubleParam *csSmooth_, *csMaxShift_, *csCorner_, *csEdgeAt_;
+  OFX::DoubleParam* sgAmount_;
+  OFX::DoubleParam *ewWidth_, *ewMix_;
+  OFX::DoubleParam *snRadius_, *snBand_, *snDetail_, *snFromPicture_;
+  OFX::DoubleParam *fgSmoothness_, *fgExtend_, *fgMix_;
   OFX::BooleanParam* debugLog_;
   std::string nodeId_;
   bool inChangedParam_ = false;
@@ -452,7 +672,7 @@ class MatteRefineFactory : public OFX::PluginFactoryHelper<MatteRefineFactory> {
     for (const auto& line : environmentSnapshot(hostInfo())) LOGI("env %s", line.c_str());
     desc.setLabels(kPluginLabel, kPluginLabel, kPluginLabel);
     desc.setPluginGrouping("Matte Refine");
-    desc.addSupportedContext(OFX::eContextFilter);
+    desc.addSupportedContext(OFX::eContextGeneral);  // decision 22: Source may be unconnected
     desc.addSupportedBitDepth(OFX::eBitDepthFloat);
     desc.setSingleInstance(false);
     desc.setHostFrameThreading(false);
@@ -480,6 +700,14 @@ class MatteRefineFactory : public OFX::PluginFactoryHelper<MatteRefineFactory> {
     src->addSupportedComponent(OFX::ePixelComponentRGB);
     src->addSupportedComponent(OFX::ePixelComponentAlpha);
     src->setSupportsTiles(false);
+    src->setOptional(true);
+    OFX::ClipDescriptor* mc = desc.defineClip(kMatteClip);
+    mc->addSupportedComponent(OFX::ePixelComponentAlpha);
+    mc->addSupportedComponent(OFX::ePixelComponentRGBA);
+    mc->addSupportedComponent(OFX::ePixelComponentRGB);
+    mc->setOptional(true);
+    mc->setIsMask(true);
+    mc->setSupportsTiles(false);
     OFX::ClipDescriptor* dst = desc.defineClip(kOfxImageEffectOutputClipName);
     dst->addSupportedComponent(OFX::ePixelComponentRGBA);
     dst->addSupportedComponent(OFX::ePixelComponentAlpha);
@@ -487,7 +715,9 @@ class MatteRefineFactory : public OFX::PluginFactoryHelper<MatteRefineFactory> {
 
     // Flame: params flow into columns of <= 5 rows, 6 columns per tab, each group starts a
     // column, pages are ignored (CLAUDE.md "Planned layout"). Groups in column order.
-    OFX::PageParamDescriptor* page = desc.definePageParam("Matte Refine");
+    // Decision 19: tab 1 "Fill & Core", tab 2 "Edge" (Flame opens it when tab 1 is full and
+    // names it after the next page).
+    OFX::PageParamDescriptor* page = desc.definePageParam("Fill & Core");
     auto group = [&](const char* name, const char* text) {
       auto* g = desc.defineGroupParam(name);
       g->setLabels(text, text, text);
@@ -516,21 +746,17 @@ class MatteRefineFactory : public OFX::PluginFactoryHelper<MatteRefineFactory> {
       return p;
     };
 
-    // --- Matte (5 rows): input, view, version ---
+    // --- Matte (3 rows): view, version. The matte is the source alpha (decision 4). ---
     auto* gMatte = group("grpMatte", "Matte");
-    auto* from = labelled(desc.defineChoiceParam(kPMatteFrom), "Matte From",
-                          "Where the input matte is read from: the source alpha (Flame's matte "
-                          "input), the luminance of the RGB (Rec.709), or the red channel.");
-    for (const char* c : kMatteFromNames) from->appendOption(c);
-    from->setDefault(kFromAlpha);
-    from->setParent(*gMatte);
     auto* view = labelled(desc.defineChoiceParam(kPView), "View",
                           "What the image output shows (the matte output is always the refined "
-                          "matte). Matte: the refined matte. Show Filled: the input matte in grey "
-                          "with the added fill in magenta. Source: the source image, for a "
-                          "front + matte chain.");
+                          "matte). Matte: the refined matte. Show Changes: the input matte in "
+                          "grey, raised pixels magenta, lowered green. Picture: the front input "
+                          "(the clean foreground colour with Foreground Colour on). Trimap: "
+                          "solid / edge / clear. Grey Inside: semi-transparent pixels deep "
+                          "inside the matte, in red.");
     for (const char* c : kViewNames) view->appendOption(c);
-    view->setDefault(kViewMatte);  // decision 11: both outputs agree
+    view->setDefault(kViewPicture);  // decision 22: the picture passes through, the matte refined
     view->setParent(*gMatte);
     auto* version = labelled(desc.defineStringParam("version"), "Version", "");
     version->setStringType(OFX::eStringTypeLabel);
@@ -538,6 +764,24 @@ class MatteRefineFactory : public OFX::PluginFactoryHelper<MatteRefineFactory> {
     version->setIsPersistant(false);
     version->setEvaluateOnChange(false);
     version->setParent(*gMatte);
+
+    // --- Clean & Crush (5 rows; A1 + A2, runs first) ---
+    auto* gCb = group("grpCleanBackground", "Clean & Crush");
+    boolean(kPCbEnable, "Enable",
+            "Remove small islands outside the subject and crush background haze beyond the edge.",
+            false, gCb);
+    number(kPCbMaxIsland, "Max Island %",
+           "Islands up to this % of the frame area are removed with their fringe. 0 = keep all.",
+           0.05, 10.0, 1.0, 3, 0.01, gCb);
+    number(kPCbBelow, "Background Below",
+           "Matte below this is background or haze; islands and the crush edge are measured at it.",
+           0.15, 0.5, 0.5, 3, 0.01, gCb)
+        ->setRange(0.01, 0.5);
+    number(kPCbCrush, "Crush Beyond px",
+           "Everything farther than this outside the edge becomes 0. 0 = no crush.", 4.0, 100.0,
+           30.0, 1, 0.5, gCb);
+    number(kPCbFeather, "Crush Feather px", "The crush fades in over this many pixels.", 2.0,
+           20.0, 10.0, 1, 0.5, gCb);
 
     // --- Fill Holes (5 rows; decisions 8-10) ---
     auto* gFh = group("grpFillHoles", "Fill Holes");
@@ -598,6 +842,64 @@ class MatteRefineFactory : public OFX::PluginFactoryHelper<MatteRefineFactory> {
              "Save this frame's input matte to ~/.cache/matte-refine/dumps for analysis. It "
              "stays on this machine.")
         ->setParent(*gSupport);
+
+    // --- Tab 2 "Edge" (decision 19), in chain order ---
+    page = desc.definePageParam("Edge");
+    auto* gCs = group("grpContourSmooth", "Contour Smooth");
+    boolean(kPCsEnable, "Enable",
+            "Take wiggle and chatter off the edge line; the edge's softness and corners are kept.",
+            false, gCs);
+    number(kPCsSmooth, "Smooth px", "Wiggles up to this wavelength are removed.", 30.0, 100.0,
+           100.0, 1, 1.0, gCs)
+        ->setRange(5.0, 100.0);
+    number(kPCsMaxShift, "Max Shift px", "The edge never moves farther than this.", 1.5, 3.0, 3.0,
+           2, 0.25, gCs)
+        ->setRange(0.25, 3.0);
+    number(kPCsCorner, "Corner deg", "Turns sharper than this are corners and kept.", 20.0, 90.0,
+           90.0, 0, 1.0, gCs)
+        ->setRange(10.0, 90.0);
+    number(kPCsEdgeAt, "Edge At", "The matte value of the edge line that is smoothed.", 0.5, 0.95,
+           0.95, 3, 0.01, gCs)
+        ->setRange(0.05, 0.95);
+    auto* gSg = group("grpShrinkGrow", "Shrink / Grow");
+    boolean(kPSgEnable, "Enable",
+            "Move the edge out (grow) or in (shrink); each part of the edge keeps its softness.",
+            false, gSg);
+    auto* amount = number(kPSgAmount, "Grow (-Shrink) px",
+                          "Pixels to move the edge outward; negative moves it inward.", 1.0, 20.0,
+                          10.0, 2, 0.25, gSg);
+    amount->setRange(-20.0, 20.0);
+    amount->setDisplayRange(-10.0, 10.0);
+    auto* gEw = group("grpEdgeWidth", "Edge Width");
+    boolean(kPEwEnable, "Enable", "Give the whole edge one consistent softness.", false, gEw);
+    number(kPEwWidth, "Edge Width px", "The edge's target width, from clear to solid.", 2.0, 16.0,
+           16.0, 2, 0.25, gEw)
+        ->setRange(0.5, 16.0);
+    number(kPEwMix, "Width Mix", "0 = the input edge, 1 = the target width.", 1.0, 1.0, 1.0, 2,
+           0.05, gEw);
+    auto* gSn = group("grpSnapToImage", "Snap to Image");
+    boolean(kPSnEnable, "Enable",
+            "Pull the edge onto the picture's edges (front input); only near the edge.", false, gSn);
+    number(kPSnRadius, "Radius px", "The window the picture is compared in.", 8.0, 32.0, 32.0, 1,
+           0.5, gSn)
+        ->setRange(1.0, 32.0);
+    number(kPSnBand, "Band px", "Changes reach this far from the edge or a soft matte area.", 12.0, 64.0, 64.0, 1, 0.5,
+           gSn);
+    number(kPSnDetail, "Detail", "Higher follows weaker picture edges.", 0.5, 1.0, 1.0, 2, 0.05,
+           gSn);
+    number(kPSnFromPicture, "Edge From Picture",
+           "0 = keep the matte's own softness, 1 = take the softness from the picture.", 0.35, 1.0,
+           1.0, 2, 0.05, gSn);
+    auto* gFg = group("grpForegroundColour", "Foreground Colour");
+    boolean(kPFgEnable, "Enable",
+            "Clean the edge's colour of the old background; View Picture shows it.", false, gFg);
+    number(kPFgSmoothness, "Edge Smoothness", "Higher = flatter foreground colour in the edge.",
+           0.005, 0.5, 0.2, 4, 0.001, gFg)
+        ->setRange(0.0001, 0.5);
+    number(kPFgExtend, "Extend px", "Also solve this far beyond the soft edge.", 3.0, 20.0, 20.0,
+           1, 0.5, gFg);
+    number(kPFgMix, "Mix", "0 = the picture, 1 = the clean foreground colour.", 1.0, 1.0, 1.0, 2,
+           0.05, gFg);
 
     // --- Hidden ---
     auto* nid = desc.defineStringParam(kPNodeId);
