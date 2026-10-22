@@ -2,12 +2,13 @@
 # Matte Refine for Flame: install or uninstall the plugin.
 #   sudo ./install.sh              install (replaces an earlier Matte Refine)
 #   sudo ./install.sh --uninstall  remove it
-# Installs /usr/OFX/Plugins/MatteRefine.ofx.bundle. Per-user settings and logs
+# Installs /usr/OFX/Plugins/MatteRefine.ofx.bundle (macOS: /Library/OFX/Plugins). Per-user settings and logs
 # (~/.config/matte-refine, ~/.cache/matte-refine) are not touched.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PLUGINS=/usr/OFX/Plugins
+[ "$(uname -s)" = Darwin ] && PLUGINS=/Library/OFX/Plugins  # where the Mac's OFX plugins live
 BUNDLE=MatteRefine.ofx.bundle
 VERSION=dev  # set by scripts/package_release.sh
 
@@ -41,4 +42,6 @@ if [ -e "$PLUGINS/$BUNDLE" ] || [ -L "$PLUGINS/$BUNDLE" ]; then
 fi
 cp -R "$HERE/$BUNDLE" "$PLUGINS/"
 chmod -R a+rX "$PLUGINS/$BUNDLE"
+# macOS: a downloaded tarball marks every file as quarantined; the bundle is not notarised.
+[ "$(uname -s)" = Darwin ] && xattr -dr com.apple.quarantine "$PLUGINS/$BUNDLE" 2>/dev/null || true
 echo "Done: Matte Refine $VERSION installed in $PLUGINS. Start Flame; the node is under Matte Refine > Matte Refine."
