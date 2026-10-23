@@ -212,3 +212,9 @@ grey inside, islands, changed), A9 **Analyze Frame** (sets the controls; Roadmap
   and the clean truth: holes, specks, chatter, mixed_edge, eroded, coarse (+ picture), fgcolor
   (+ true foreground), all. Tests use them in memory; `mr_synth <dir> [WxH]` writes EXR (matte
   as grey RGB for the source alpha input, picture, truth) for evaluation and demos in Flame.
+  **ML scenes (2026-10-23, for `ofx/ml/PLAN_FEATURES.md`):** `gaps` (B3: 10 defect holes to fill and 5 real gaps to keep,
+  size ranges overlap, label image 0 background / 1 subject / 2 defect / 3 real gap, plus a grey wash), `hair_flat` and
+  `hair_busy` (B1/B2: 260 strands of 1-3 px lost in the coarse matte; same truth over a flat or a busy background) and
+  `makeSequence` (B4: 9 frames, true affine motion per frame, per-frame jitter + speckle + a flickering hole; scorers
+  `flicker` and `bandError`). CLI `mr_synth <dir> [WxH] [scene...]` also writes the label / fg / motion files.
+

@@ -23,6 +23,10 @@ bool logEnabled(LogLevel level);
 // Keeps at most `keep` rotated files of about `maxBytes` each. Called at plugin load.
 void rotateLogs(size_t maxBytes = 10u << 20, int keep = 5);
 
+// The component name at the start of every line of this process ("ofx" unless set; Matte Refine
+// ML's runner process sets "runner"). At most 15 characters; call before other threads log.
+void setLogComponent(const char* name);
+
 void logAt(LogLevel level, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
 
 #define LOGD(...) ::mr::logAt(::mr::LogLevel::Debug, __VA_ARGS__)
