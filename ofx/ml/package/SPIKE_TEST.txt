@@ -1,0 +1,32 @@
+FLAME TEST FOR MATTE REFINE ML (phase 1 spike, with the runner)
+================================================================
+Written 2026-10-23. About 20 minutes. On akflame5.
+
+WHAT THIS TESTS
+  The plugin sends 512 px tiles of the matte edge to a separate runner program (ViTMatte on the GPU).
+  Answers we cannot get from numbers: does Flame freeze while a frame renders, does scrubbing work,
+  does Batch Render work, what happens with two nodes, is a frame rendered twice, does Flame start
+  the runner program correctly. Expected: HD frame about 0.13 s, UHD about 0.3 s, first frame about 1.4 s.
+
+SETUP (assistant does the config; you do the sudo + restart)
+  1. sudo ln -s ~/MatteRefine_build/mlbench/repo/build_ml/MatteRefineML.ofx.bundle /usr/OFX/Plugins/
+  2. Restart Flame. The node is "Matte Refine ML" (group "Matte Refine").
+  3. Log: ~/.cache/matte-refine/logs/matte-refine.log (one line per render), runner messages:
+     ~/.cache/matte-refine/logs/runner-stderr.log
+  Runner status any time:  ~/MatteRefine_build/mlbench/repo/build_ml/MatteRefineML.ofx.bundle/Contents/Resources/mr_ml_runner --status
+  To stop it:              ... mr_ml_runner --quit   (it also stops itself after 5 minutes idle)
+
+TESTS (use your real matte; picture on the front, the matte on the second socket (source alpha))
+  1. First frame: add the node, Enable on, View = Picture then Matte. Note the delay of the first
+     frame (about 1.5 s expected) and that the UI comes back. Does the footer show an error?
+  2. Scrub: drag along the timeline over 20+ frames. Smooth? UI responsive between frames?
+  3. Drag Band px (try 5, 10, 20, 40), Mix 0..1, Only Grey, Model Small <-> Base (Base loads a
+     second session once: about 1-2 s delay the first time).
+  4. Views: Trimap (should be 3 grey levels), Changes (green = added, magenta = removed).
+  5. Batch Render a range of 20-50 frames at your real resolution. Time it, UI usable meanwhile?
+  6. Two Matte Refine ML nodes in one batch (different mattes): both correct? 
+  7. Optional: UHD matte. Optional: kill the runner during playback (mr_ml_runner --quit) and check
+     the next frame recovers.
+  8. Is a frame rendered twice by Flame? Count render lines per frame in the log.
+  Then Collect Logs on the node (Model & Support column) and tell the assistant what you saw:
+  freezes (none / short / long), scrub feel, render time vs frames, anything odd.

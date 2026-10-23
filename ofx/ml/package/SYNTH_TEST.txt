@@ -1,0 +1,39 @@
+SYNTHETIC SCENES TEST (Matte Refine ML): scenes with known answers, like plugin 1's
+===================================================================================
+Written 2026-10-23. Files on akflame5:  ~/MatteRefine_build/demo/ml/   (1920x1080 float EXR, 666 MB)
+Older scenes (coarse, eroded, mixed_edge, fgcolor, all, holes ...) are in ~/MatteRefine_build/demo/ .
+Import a pair into Flame, wire as always: PICTURE (xxx_rgb.exr) on the front socket, MATTE (xxx_matte.exr, grey RGB)
+on the second socket. xxx_truth.exr is the right answer to compare against in the viewer (Wipe / Difference).
+
+SCENE 1  gaps   (tests Smart Fill, B3)
+  Files: gaps_rgb.exr, gaps_matte.exr, gaps_truth.exr, gaps_label.exr (grey = label/3: black bg, dark grey subject,
+  light grey = defect hole to FILL, white = real gap to KEEP).
+  The matte has 10 defect holes (47 to 9902 px, some clear, some grey) and 5 REAL gaps (arm on hip 20441 px, between
+  the legs 9136, a ring in the hand 4049, a small ring 696, an earring 193), sizes overlap on purpose, plus a grey wash on
+  the right side of the torso. A warm striped subject on a cool background (colour makes it easy: it is a plumbing test).
+  Expect with Smart Fill ON (defaults: threshold 0.6, Max Hole 10 %, Lite):
+    View = Holes: all 10 defect holes GREEN (filled), all 5 real gaps RED (kept); the result matches gaps_truth.
+    (Core evaluation: 196/196 defects filled, 100/100 real gaps kept, the real BiRefNet reproduces it.)
+  Compare: plugin 1 Fill Holes with Max Hole 1 % fills the arm gap and part of the others (40 % of real-gap pixels
+  wrongly), Max Hole 0.2 % leaves most defects unfilled: size alone cannot separate them.
+  Try: Subject Threshold 0.3 / 0.9, Max Hole % 0.5, Segmentation Full; wash is NOT a hole (left alone).
+
+SCENE 2  hair_flat, hair_busy   (tests Edge Refine on hair; B1)
+  Files: hair_flat_rgb / _matte / _truth.exr and the same for hair_busy (busy textured background).
+  The truth has 260 thin hair strands (1 to 3 px) on top of the head; the matte is the coarse version with the strands lost.
+  Expect with Edge Refine ON (Band px 10, Mix 1): the head contour is cleaned, but most strands stay lost
+  (about 13-18 % of the lost strand alpha comes back over the whole frame; about 80 % of it lies outside even a 30 px band).
+  Try Band px 10 / 30 / 60: more strands back, slower. View = Changes shows what the model changed.
+  NEW: the Edge Refine control "Outer px" (default 0) reaches further OUT on the background side, where the lost strands are.
+  Try Band px 10 with Outer px 100 and 140: expect about 5x more strand alpha back (core numbers: 0.13 -> 0.67 on hair_flat / hair_busy)
+  and about +25 % time. Above about 190 px it starts to spill on the busy background. On the clean scenes Outer px costs quality: leave it 0.
+
+SCENE 3  temporal   (tests Temporal Stabilise, B4: AFTER the Temporal build is deployed)
+  Files: temporal_rgb.0000..0008.exr and temporal_matte.0000..0008.exr (9 frames; Flame reads each as a sequence), temporal_motion.txt (true motion).
+  A figure moves and rotates slightly; the matte has fresh edge jitter and speckle every frame and a hole that
+  flickers on about half the frames. Expect Temporal ON (+-1 frame): edge flicker about 55 % lower, hole mostly left.
+
+QUICK REGRESSION  coarse, eroded, mixed_edge, fgcolor in ~/MatteRefine_build/demo/ with Edge Refine ON: the model must only
+  touch the band (View = Changes): coarse should land near its truth (band error 0.22 -> 0.03).
+
+Report: for each scene say what you saw (counts of green / red holes, strands visible, any footer or error).

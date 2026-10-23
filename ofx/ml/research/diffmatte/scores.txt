@@ -1,0 +1,98 @@
+
+coarse band 10: input band err 0.2211; lost strand alpha 0 (in band 0)
+  model                band err  rec all   spill rec band spill b
+  vitmatte-small         0.0320    0.000   0.000    0.000   0.000
+  vitmatte-base          0.0310    0.000   0.000    0.000   0.000
+  dm-vits-s1             0.0329    0.000   0.000    0.000   0.000
+  dm-vits-s3             0.0322    0.000   0.000    0.000   0.000
+  dm-vits-s5             0.0321    0.000   0.000    0.000   0.000
+  dm-vits-s10            0.0321    0.000   0.000    0.000   0.000
+  dm-vits-s10-seed1      0.0343    0.000   0.000    0.000   0.000
+  dm-vitb-s1             0.0292    0.000   0.000    0.000   0.000
+  dm-vitb-s5             0.0294    0.000   0.000    0.000   0.000
+  dm-vitb-s10            0.0294    0.000   0.000    0.000   0.000
+  dm-vits1024-s10        0.0376    0.000   0.000    0.000   0.000
+
+eroded band 10: input band err 0.1175; lost strand alpha 10320 (in band 10320)
+  model                band err  rec all   spill rec band spill b
+  vitmatte-small         0.0082    0.982   0.058    0.982   0.058
+  vitmatte-base          0.0080    0.989   0.054    0.989   0.054
+  dm-vits-s1             0.0104    0.980   0.044    0.980   0.044
+  dm-vits-s3             0.0100    0.980   0.042    0.980   0.042
+  dm-vits-s5             0.0098    0.980   0.043    0.980   0.043
+  dm-vits-s10            0.0097    0.981   0.044    0.981   0.044
+  dm-vits-s10-seed1      0.0098    0.981   0.044    0.981   0.044
+  dm-vitb-s1             0.0055    0.992   0.033    0.992   0.033
+  dm-vitb-s5             0.0053    0.992   0.030    0.992   0.030
+  dm-vitb-s10            0.0052    0.991   0.030    0.991   0.030
+  dm-vits1024-s10        0.0088    0.993   0.057    0.993   0.057
+
+hair_busy band 10: input band err 0.1893; lost strand alpha 28446 (in band 6590)
+  model                band err  rec all   spill rec band spill b
+  vitmatte-small         0.1066    0.137   0.006    0.593   0.025
+  vitmatte-base          0.0912    0.140   0.006    0.606   0.026
+  dm-vits-s1             0.0916    0.139   0.005    0.599   0.023
+  dm-vits-s3             0.0907    0.139   0.005    0.602   0.022
+  dm-vits-s5             0.0907    0.140   0.005    0.602   0.022
+  dm-vits-s10            0.0908    0.140   0.005    0.603   0.023
+  dm-vits-s10-seed1      0.0912    0.140   0.005    0.603   0.023
+  dm-vitb-s1             0.0765    0.140   0.004    0.605   0.017
+  dm-vitb-s5             0.0767    0.140   0.004    0.604   0.016
+  dm-vitb-s10            0.0769    0.140   0.004    0.604   0.016
+  dm-vits1024-s10        0.0533    0.181   0.007    0.780   0.032
+
+hair_busy band 30: input band err 0.1042; lost strand alpha 28446 (in band 11713)
+  model                band err  rec all   spill rec band spill b
+  vitmatte-small         0.0807    0.140   0.005    0.340   0.012
+  vitmatte-base          0.0632    0.197   0.010    0.477   0.023
+  dm-vits-s1             0.0809    0.135   0.006    0.328   0.015
+  dm-vits-s3             0.0814    0.135   0.006    0.327   0.014
+  dm-vits-s5             0.0816    0.135   0.006    0.328   0.014
+  dm-vits-s10            0.0817    0.135   0.006    0.328   0.014
+  dm-vits-s10-seed1      0.0819    0.135   0.006    0.328   0.014
+  dm-vitb-s1             0.0691    0.138   0.004    0.335   0.010
+  dm-vitb-s5             0.0694    0.138   0.004    0.335   0.010
+  dm-vitb-s10            0.0696    0.138   0.004    0.335   0.010
+  dm-vits1024-s10        0.0542    0.217   0.008    0.528   0.019
+
+hair_flat band 10: input band err 0.1893; lost strand alpha 28446 (in band 6590)
+  model                band err  rec all   spill rec band spill b
+  vitmatte-small         0.1302    0.130   0.003    0.560   0.013
+  vitmatte-base          0.1041    0.134   0.003    0.580   0.015
+  dm-vits-s1             0.0969    0.139   0.004    0.602   0.017
+  dm-vits-s3             0.0957    0.140   0.004    0.603   0.017
+  dm-vits-s5             0.0956    0.140   0.004    0.603   0.017
+  dm-vits-s10            0.0957    0.140   0.004    0.603   0.018
+  dm-vits-s10-seed1      0.0963    0.140   0.004    0.603   0.018
+  dm-vitb-s1             0.0729    0.143   0.003    0.617   0.012
+  dm-vitb-s5             0.0730    0.143   0.003    0.617   0.011
+  dm-vitb-s10            0.0731    0.143   0.003    0.617   0.011
+  dm-vits1024-s10        0.0977    0.140   0.004    0.602   0.015
+
+hair_flat band 30: input band err 0.1042; lost strand alpha 28446 (in band 11713)
+  model                band err  rec all   spill rec band spill b
+  vitmatte-small         0.0889    0.129   0.004    0.313   0.009
+  vitmatte-base          0.0860    0.131   0.003    0.317   0.007
+  dm-vits-s1             0.0812    0.135   0.004    0.329   0.010
+  dm-vits-s3             0.0816    0.135   0.004    0.329   0.009
+  dm-vits-s5             0.0818    0.135   0.004    0.328   0.009
+  dm-vits-s10            0.0819    0.135   0.004    0.328   0.009
+  dm-vits-s10-seed1      0.0821    0.135   0.004    0.328   0.009
+  dm-vitb-s1             0.0718    0.138   0.003    0.335   0.007
+  dm-vitb-s5             0.0722    0.138   0.003    0.334   0.007
+  dm-vitb-s10            0.0724    0.138   0.003    0.334   0.007
+  dm-vits1024-s10        0.0772    0.138   0.004    0.336   0.009
+
+mixed_edge band 10: input band err 0.0210; lost strand alpha 495 (in band 495)
+  model                band err  rec all   spill rec band spill b
+  vitmatte-small         0.0086    0.997   0.842    0.997   0.842
+  vitmatte-base          0.0080    0.999   0.568    0.999   0.568
+  dm-vits-s1             0.0122    0.996   0.522    0.996   0.522
+  dm-vits-s3             0.0120    0.996   0.498    0.996   0.498
+  dm-vits-s5             0.0118    0.996   0.502    0.996   0.502
+  dm-vits-s10            0.0116    0.997   0.509    0.997   0.509
+  dm-vits-s10-seed1      0.0118    0.997   0.509    0.997   0.509
+  dm-vitb-s1             0.0060    0.999   0.387    0.999   0.387
+  dm-vitb-s5             0.0059    0.999   0.349    0.999   0.349
+  dm-vitb-s10            0.0059    0.999   0.343    0.999   0.343
+  dm-vits1024-s10        0.0102    0.998   0.833    0.998   0.833

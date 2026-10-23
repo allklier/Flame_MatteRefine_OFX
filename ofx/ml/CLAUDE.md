@@ -1,4 +1,4 @@
-# ofx/ml/CLAUDE.md — Matte Refine ML (plan; nothing built yet)
+# ofx/ml/CLAUDE.md — Matte Refine ML (built; plan, decisions, measurements, risks)
 
 The second plugin: ML and slow matte refinement, in this repo and CMake project next to Matte
 Refine (root decisions 17, 18, 27). Plugin 1 stays real-time and inline (14). Goal, architecture and
@@ -10,10 +10,10 @@ OPEN / UNVERIFIED). Written 2026-10-23. Keep this file under ~250 lines.
 
 The input is a good matte (LTX or elsewhere); every ML operation **keeps it and fixes defects**.
 Whole-matting models (MatAnyone, VideoMaMa, GVM, SAM2Matting, SDMatte, keyers) stay out. The
-user's picture (front input) is the guide, the matte (Matte input) is the subject; same inputs
+user's picture (front input) is the guide, the matte (its alpha, decision 35) is the subject; same inputs
 and colour rules as plugin 1 (decisions 22-24).
 
-| # | Operation | What it does | Model (licence, see below) |
+| # | Operation | What it does | Model (licences: `LICENCES.md`) |
 |---|---|---|---|
 | B1 | **Edge Refine** | trimap from the matte itself (solid core / grey band widened by N px / clear); the model re-solves only the band; Mix + "only where the matte was grey"; outside the band bit-identical | ViTMatte (first), others later |
 | B2 | **Edge Refine, diffusion** | same trimap, finer hair detail, slower | DiffMatte |
@@ -37,7 +37,11 @@ and colour rules as plugin 1 (decisions 22-24).
   Gen: a resident worker process (`~/ClaudeCode/LTX_OFX`, its `CLAUDE.md` and `worker/`), Process
   button, disk cache (decision 14 explicitly does not apply to plugin 2 then). **The decision
   is made on measurements** (plan below), in Flame, not on estimates.
-- **29. PROPOSED: runtime = ONNX Runtime in the .ofx** (C API; CUDA execution provider on Rocky,
+  **Update 2026-10-23: forced by decision 32** (library collisions with Flame's own ONNX Runtime),
+  but as a synchronous runner, not LTX's offline worker: decision 14 still holds.
+  **Flame test 2026-10-23 (user): worked well, Flame stayed very responsive; the gate is met
+  (see phase 1).** Inline-with-runner is the architecture; no Process button, no cache.
+- **29. PROPOSED: runtime = ONNX Runtime** (in the runner process, 32; was: in the .ofx) (C API; CUDA execution provider on Rocky,
   CoreML or CPU on the Mac), models as `.onnx` files in a model folder fetched by a setup step with
   a licence gate (as LTX's Setup). Why: one shared library instead of libtorch's size; the
   same model file on both platforms; the worker fallback can load the same files. Alternatives
@@ -50,10 +54,58 @@ and colour rules as plugin 1 (decisions 22-24).
   result replaces the band and fades to the input at its border (same seam rule as Snap to
   Image). Cost then scales with the edge length, not the frame. Everything outside the band is
   bit-identical to the input (the plugin-1 rule, decision 17).
+- **32. DECIDED (user, 2026-10-23): a synchronous runner process owns ORT, CUDA and the models;
+  the .ofx holds no GPU library.** Why: Flame ships its own ONNX Runtime 1.22.0 and CUDA 12.8 /
+  cuDNN 9.9 (`/opt/Autodesk/lib64/<version>/`, seen on akflame5) and can load them at any time
+  (inference nodes, Isolate). Our ORT 1.31 / CUDA 13 in the same process would be shadowed by
+  the soname `libonnxruntime.so.1`, and cuDNN's same-soname sub-libraries would mix with
+  Flame's (order-dependent crashes in Flame's own nodes). Building against Flame's libraries
+  (option B) was rejected: they change between Flame versions and we won't ship per-version
+  plugins. Design: the plugin implements `TileRunner` by sending tiles to `mr_ml_runner` (one
+  per user and machine, started lazily under a lock, shared by every node and every Flame
+  process, one connection each, tiles in shared memory, one tile at a time on the GPU, idle
+  exit); sessions live in the runner, one per model (LRU). Still synchronous per frame, no cache,
+  no Process button. Protocol version handshake (a mismatched runner is told to quit and
+  replaced); per-tile timeout; a runner failure gives a pass-through matte and an error footer,
+  the next render restarts it. Mac: same design with CoreML. The spike's in-process path
+  (`ort_runner`) stays as the runner's engine and the benchmark harness.
+- **33. DECIDED (user, 2026-10-23): Matte Refine ML on macOS is deferred; the Mac ships Matte Refine
+  (plugin 1) only.** Why: ViTMatte via ORT's CoreML EP is 10-20x slower than CUDA (HD 1.4-2.6 s,
+  `PHASE0_RESULTS.md`), misses the decision 28 gate. The user leans towards a native Core ML conversion (coremltools) later, not now. The
+  runner design (32) keeps the engine swappable, so a Mac runner can be added without changing the
+  plugin. Rocky first.
+- **34. DECIDED (user, 2026-10-23): "Picture Colour" = Auto / Bypass; the plugin does no colour maths.**
+  Auto asks Flame for `Rec.1886 Rec.709 - Display` (OpenFX 1.5 `OfxImageClipPropPreferredColourspaces_Source`
+  in the GetClipPreferences out args; built-in list `kPicturePref`);
+  Bypass asks for nothing. Model input = picture clamped to 0-1, no gamma (synthetic band error
+  better on every scene). Verified in Flame 2027.2 (`PHASE0_RESULTS.md`, "Colour probe"): Flame
+  converts (LogC3 mean 0.46 -> 0.68, plain gamma 2.4, no tone mapping, values above 1), the
+  descriptor route is refused, the reported tag reads "Matte" when a matte is connected (never
+  decide from it). Live switching Auto/Bypass VERIFIED in Flame (clip preferences re-run on the flip). In the
+  old two-clip layout the picture arrived converted in both modes (35); in the filter layout both modes
+  behave as specified. Fallback if it ever fails: OCIO in the runner (explicit dropdown).
+- **35. DECIDED (user, 2026-10-23): Matte Refine ML is a filter, like LTX Alpha Gen: picture required on
+  the front, the matte in its alpha. Supersedes decision 22 for ML only (plugin 1 keeps it).** Why: with
+  the separate Matte mask clip (General context, Source optional) Flame 2027.2 delivered the picture
+  converted to Rec.1886 even in Bypass and tagged the Source "Matte" (`PHASE0_RESULTS.md`, Colour probe;
+  cause unexplained); LTX, a plain filter, does not. Decision 22's reason (a node without a picture)
+  does not apply: the model needs the picture. Built: `eContextFilter` only, mandatory Source
+  (RGBA/RGB), no Matte clip, RoD from Source; footers for a constant alpha ("connect the matte to the
+  node's second socket") and an RGB-only source. Output tag: Auto = the requested name, Bypass =
+  Source. The temporary developer keys (`ml_layout`, `ml_output_cs`, `ml_picture_pref`) and the legacy
+  layout were removed 2026-10-23. **VERIFIED in Flame 2027.2 (user + log, 2026-10-23): the conversion / "Matte" tag problem is gone**
+  (Bypass = raw clip with its true tag, Auto = converted with the requested name; user: input layout matches
+  LTX). The separate Matte mask clip caused it. UNVERIFIED: old setups across layouts, Flame's describe cache.
+- **36. DECIDED (user, 2026-10-23): feature plan** (`PLAN_FEATURES.md`). B2 DiffMatte is a model choice
+  inside Edge Refine, not its own column; a slow model is acceptable behind a Quality switch if it passes
+  the quality test; BiRefNet must run in 24 GB of VRAM: limit its arena only when the card is small
+  (about 32 GB or less), never cap bigger cards; build order B3 (smart fill) before B4 (temporal).
+  **Update 2026-10-23: B2 DiffMatte SHELVED (user): no licence for code or weights, weights only on Google Drive;
+  rule: fetch weights only from stable hosts such as HuggingFace. Spike kept in `research/diffmatte/`.**
 
 ## Plan, in order (each phase ends with a go / no-go for the next)
 
-0. **Benchmark first, no plugin. DONE on BFD 2026-10-23 (results below); target-host runs open.** A standalone tool `ofx/ml/tools/mr_ml_bench`: loads an ONNX
+0. **Benchmark first, no plugin. DONE 2026-10-23 on BFD and akflame5 incl. the Flame contention test (results: summary below, details in `PHASE0_RESULTS.md`); the Mac run is in progress.** A standalone tool `ofx/ml/tools/mr_ml_bench`: loads an ONNX
    file with the candidate runtime and runs tiles cut from the synthetic scenes (21) and the
    user's real mattes (the Save Matte dumps; confidential, stay on the machine) at HD and UHD.
    Measure: warm and cold latency per tile (256, 512, 1024), tiles per typical frame, total
@@ -62,10 +114,67 @@ and colour rules as plugin 1 (decisions 22-24).
    lesson). Candidates: ViTMatte small and base (fp32, fp16), BiRefNet lite and standard.
    Output: a table here, and the quality of each on the synthetic "coarse" / "eroded" scenes
    against their truth (B1) and on a real frame.
-1. **Spike plugin** (inline): `MatteRefineML` with one node, B1 only, ViTMatte, lazy model load,
-   per-stage timings in the log, no polish. The Flame test answers what the numbers cannot:
-   does the UI freeze while a frame renders, does scrubbing work, Batch Render, memory growth,
-   what happens when two nodes run, does Flame render a frame twice.
+1. **Spike plugin with the runner (decision 32). BUILT 2026-10-23 (Opus agents), tests green on BFD
+   and akflame5 (21/21); not yet tried in Flame.** Node `MatteRefineML` 0.0.1 (spike; now 0.1.0), B1 only, ViTMatte
+   small / base; columns Matte (View Picture/Matte/Trimap/Changes) · Edge Refine (Enable, Band px
+   10, Mix, Only Grey) · Model & Support. `render()` stays synchronous (14). The .ofx holds no ORT
+   and loads no GPU library (test `ml_bundle_deps`: about 770 KB, libc/libstdc++ only, no RPATH).
+   Code in `ofx/ml/src/`: `edge_refine` (core, `TileRunner`), `runner_client` (in the plugin),
+   `runner_ipc` / `runner_protocol` / `runner_server` / `runner_main` (`mr_ml_runner`, C++17,
+   owns ORT via `ort_runner`).
+   - **Runner:** one per user and machine, shared by all nodes and Flame processes; socket
+     `$XDG_RUNTIME_DIR/matte-refine-ml/runner.sock` (else `/tmp/matte-refine-ml-<uid>/`, mode
+     0700, peer uid checked); started lazily by the first tile under `flock`, via `posix_spawn`
+     with a fixed environment (no Flame `LD_LIBRARY_PATH` / `LD_PRELOAD`), daemonises, re-execs
+     itself with `LD_LIBRARY_PATH` = ORT folder + `ml_cuda_libs`. Protocol v1: 16-byte headers,
+     HELLO passes a sealed memfd slot (tiles in shared memory), RUN / STATUS / QUIT; build id =
+     version + git hash, a different build is told to QUIT and replaced once. Sessions per
+     (model, EP), shared, max 2 (LRU), failures remembered 30 s; model calls FIFO, one at a time;
+     idle exit 5 min; `mr_ml_runner --status|--quit`. **After rebuilding with the same git hash
+     run `--quit`.**
+   - **Runner protocol 2 + model table (P1, 2026-10-23).** `model_table.{h,cpp}`: a row per model (id, file
+     `<id>/model.onnx`, tensor names, channels in / out, size rule, licence id, sha256 (unchecked until P2),
+     CUDA `gpuMemLimitMiB` / `arenaSameAsRequested`; rows: vitmatte-small / base, birefnet-lite / birefnet fp32).
+     RUN names the model and carries {cIn, H, W, cOut, Ho, Wo, x, y}; slot = [input][output] float32 (20 MiB,
+     grows by reconnect, cap 256 MiB); the server validates every field (kBadRequest + reason). Client:
+     generic `run(model, ...)`, `TileRunner` on top (ViTMatte bit-identical on CPU), `runFrame` for B3. BFD:
+     no slowdown (HD 118 ms); BiRefNet-lite whole frame IoU 0.983, 155 ms; arena limit works (lite: unlimited
+     15.7 GB, 12 GB limit -> 12.6, 8 GB -> 8.2 and runs, 4 GB -> clean error): data for decision 36.
+   - **B3 Smart Fill built into the plugin (2026-10-23; not yet tried in Flame).** Column Smart Fill between Matte and
+     Edge Refine (Enable off, Subject Threshold 0.6, Max Hole % 10, Segmentation Lite / Full), chain matte -> Smart Fill ->
+     Edge Refine (`render_chain.{h,cpp}`; a failing step passes its input through with a footer), View "Holes" (filled green,
+     kept red). Decision 36 memory rule in the runner (`cudaArenaFor`): arena hint only on cards <= 32768 MiB total; hints
+     lite 8192, full 10240 (BFD: full fails at 8192, lite at 6144). BFD warm: HD 148-160 ms (model 121), UHD 209 ms;
+     lite + Edge Refine HD 299 ms. Smart Fill off = previous build byte for byte. Details `PLAN_FEATURES.md`.
+   - **B4 Temporal built into the plugin (2026-10-23; not yet tried in Flame).** Column Temporal before Smart Fill (Enable off, Frames
+     +-1 / +-2, Strength 1, Band px 6 x render scale); chain matte -> Temporal -> Smart Fill -> Edge Refine; temporal clip access declared on
+     the effect and Source; `getFramesNeeded` asks [t-K, t+K]; neighbours via `fetchImage(t+-k)` in render(); a failure or no neighbours passes
+     the matte through with a footer. Scratch host: HD K=1 flicker -56 %, K=2 -69 %, nothing lowered outside the band, Temporal off byte-identical.
+     Plugin cost about 75 / 130 ms (HD K=1 / 2), 210 / 365 ms (UHD) plus Flame's fetch per neighbour. UNVERIFIED in Flame: fetchImage(t+-k) in
+     render(), getFramesNeeded honoured, fetch cost, cache invalidation (the log answers: `TEMPORAL_TEST.txt`).
+   - **Failures:** a broken connection is retried once; a tile unanswered within
+     `ml_tile_timeout_s` (20) is an error; the footer says why, the matte passes through, the next
+     render retries. Install: runner in `<bundle>/Contents/Resources/` (`ml_runner` overrides).
+     Config: plugin `ml_runner`, `ml_tile_timeout_s`; runner `ml_model_dir`, `ml_ep`,
+     `ml_cuda_libs`, `log_level`.
+   - **Measured on BFD:** warm HD 124 ms, UHD 298 ms (same as in-process); transport about 0.3 ms
+     per tile; two clients 206-215 ms per HD frame each; cold first frame 1.25-1.4 s; runner RSS
+     1.1 GB, GPU +1.5 GB; CPU EP bit-identical to in-process, CUDA within 1.7e-3. Verified with
+     a dummy `libonnxruntime.so.1` preloaded into the host and `kill -9` of the runner mid-frame.
+   - **Flame test on akflame5, 2026-10-23 (user + log): worked well, Flame stayed very responsive.**
+     Log of 152 active renders (HD, two nodes, one runner, one start, no reconnect, no abort, no
+     error, no frame rendered twice): render() median 105 ms (Small) / 111 ms (Base), p95 108 /
+     175 ms; cold first frame 789 ms (Small), 587 ms (Base, second session 437 ms); runner
+     overhead about 2 ms; 978 tiles served. Not in the log: UHD, a long Batch Render, a killed runner.
+   - **B1 polish (2026-10-23, built, not yet in Flame).** Edge Refine = Enable, Band px 10, **Outer px (0)**, Mix, Only Grey (5 rows). Outer px is
+     an asymmetric reach on the background side (unknown region -(band + outer) <= sd <= band; both ends fade over band/2; 0 = the old rule bit for
+     bit). Hair at 1080: Outer 100-150 recovers about 5x the lost strand alpha (0.13 -> 0.67) for about +25 % frame time, but costs quality on clean
+     mattes (fgcolor, eroded, mixed_edge) and spills on busy backgrounds from 190: default stays 0, keep it <= about 150 frame px at any resolution;
+     a wider symmetric band does nothing for hair; picture-guided reach rejected. Band / Outer px stay in frame pixels (x render scale). Runner:
+     a hung runner is probed (STATUS, 1 s) and killed only when the peer pid and uid match; socket `runner-<8 hex of build id>.sock` per build;
+     runner logs as component "runner" (`mr::setLogComponent`, ofx/src/log); `runner-stderr.log` capped at 5 MiB. **OPEN:** the threaded trimap
+     (`signedEdgeDistanceThreaded`: HD -8 ms, UHD -16..-50 ms, but the band border moves up to 1 px and per-pixel results exceed the model noise: not
+     switched; the user decides); GPU 0 only; Collect Logs may not include `runner-stderr.log` (unchecked).
 2. **Decision 28's gate:** stay inline / add a worker with Process + cache / both (inline for
    the light models, worker for DiffMatte). **PROPOSED thresholds** (the user sets them): a warm
    HD frame of a typical subject within about 1 s and no single frame longer than about 3 s
@@ -76,82 +185,30 @@ and colour rules as plugin 1 (decisions 22-24).
    probably the cache; last.
 5. Packaging: install script, model setup and licence gate, release notes, Mac build.
 
-## Phase 0 results (2026-10-23, built by an Opus agent; `ofx/ml/tools/mr_ml_bench`)
+## Phase 0 results: summary (details: `PHASE0_RESULTS.md`)
 
-Machine: BFD, i9-12900KS, RTX PRO 4500 Blackwell 32 GB, driver 595, ONNX Runtime 1.31.0 (cuda13
-package), CUDA 13.4 libraries from PyPI. **Not yet run on the target hosts** (akflame5 Rocky 9, driver
-580.159; lbm M1 Ultra); a run package exists (`fetch.sh`, `build_rocky9.sh`, `build_mac.sh`,
-`run_bench.sh`, README; in `ofx/ml/package/`). Warm frames, tiles one after another, trimap band 10 px at HD:
+Tool `ofx/ml/tools/mr_ml_bench` (Opus agent, 2026-10-23), run package `ofx/ml/package/`. Measured on BFD
+(RTX PRO 4500), **akflame5 (RTX PRO 6000 Blackwell, Flame's driver 580.159, Xeon 658X)** and, in progress,
+lbm (M1 Ultra). Everything below is on akflame5 unless noted.
+- **Speed (ViTMatte-small, CUDA, tile 512, band 10 px, all edge tiles of a frame in sequence):** HD frame
+  98-131 ms, UHD 207-328 ms, real t36 (2880×1620) 168 ms, t44 92 ms; base model 1.2× slower; per tile 6 ms
+  (512), 24 ms (1024: 4× the cost per pixel). Cold: load ~0.5 s, first frame 0.3-0.7 s. GPU memory 1.4-3.2
+  GB. CPU only: 1.3 s HD / 2.7 s UHD (a fallback, not a plan). BiRefNet whole frame 112 ms HD / 251 ms UHD,
+  8-16 GB of GPU memory (arena unlimited), IoU 0.97-0.98, (B3 eval 2026-10-23: keeps real gaps open on synthetic scenes; the Phase 0 "closes real gaps" note counted 1-px truth artefacts; real footage unverified).
+- **Quality (synthetic, mean error in the band; input / ViTMatte / Snap to Image):** coarse 0.221 / 0.033 /
+  0.095, eroded 0.118 / 0.010 / 0.076, all 0.079 / 0.020-0.026 / 0.063; it makes a clean matte worse (0.013),
+  removes hair outside the 10 px band, and the synthetic picture contains the true edge: real footage decides.
+- **Runtime:** ONNX Runtime 1.31 + CUDA 13.4 libraries (PyPI wheels, 1.6 GB) **run under Flame's driver
+  580** (verified); needs glibc 2.28 only (fits Rocky 9); the headers need **C++17** (own translation
+  units; the plugin is C++14); macOS package includes the CoreML EP.
+- **Contention with Flame (user test):** no major slowdown in Flame; the model is unaffected by idle,
+  playback and scrubbing and ~45 % slower (131 → 190 ms) during a heavy Batch Render. Flame peaks ~45 GB
+  VRAM: headroom is not a problem.
+- **Against the proposed gate (decision 28):** met by a wide margin for GPU-sharing and time. **Not yet
+  measured: the plugin blocking Flame's render thread** (phase 1 spike) and the Mac.
+## Licences
 
-| ViTMatte-small, CUDA EP | tiles | per tile | frame |
-|---|---|---|---|
-| coarse HD, tile 256 / 512 / 1024 | 17 / 9 / 4 | 3.4 / 8.2 / 44 ms | 78 / 112 / 240 ms |
-| all HD, tile 256 / 512 | 31 / 12 | 3.5 / 8.2 ms | 144 / 148 ms |
-| coarse UHD, tile 256 / 512 | 49 / 18 | 3.5 / 8.2 ms | 229 / 231 ms |
-| all UHD, tile 256 | 85 | 3.5 ms | 395 ms |
-| real t36 (2880×1620), tile 512 | 15 | 8.2 ms | 189 ms |
-| real t44 (2880×1620), tile 512 | 8 | 8.2 ms | 103 ms |
-
-Cold: model load 380-510 ms, first inference ~200 ms. GPU memory 0.9 → 1.6-3.4 GB, RSS 1.2-1.4 GB.
-Base model 1.3× the small one (coarse HD tile 512: 172 ms). CPU EP: 1 s (HD, tile 256) to 4.5 s (UHD).
-Pre-processing (single-threaded `pow`) is ~30 % of the frame: easy to speed up. 1024 tiles cost 5×
-more per pixel than 512. **BiRefNet** (whole frame, 1024²): lite 100-113 ms, standard 163-220 ms per
-inference (fp16 faster), HD frame 150-272 ms; **8.5-16.7 GB of GPU memory** (likely ORT's arena: not
-yet limited), load 2-3 s, CPU 4.3 s and 12 GB.
-
-**Quality, mean |error| in the band vs the truth** (input / ViTMatte-small blended back / Snap to
-Image): coarse HD 0.221 / **0.033** / 0.095; eroded HD 0.118 / **0.010** / 0.076; all HD 0.079 /
-**0.020-0.026** / 0.063; mixed_edge 0.021 / 0.010 / 0.0105 (tie); **clean matte (fgcolor) 0.000 /
-0.013 / 0.005 (both ML and Snap make it worse)**. Base is no better than small. Tile size barely
-matters. Crops: eroded arm edge matches the truth; on coarse the **hair outside the 10 px band is
-removed** (the trimap marks it clear) and a faint grey ring shows inside the blend. BiRefNet "all":
-IoU 0.97-0.98, but it closes most real gaps (hole components: input 24, model 1-4, truth 7), so it is
-not yet a drop-in inside/outside signal for B3. The synthetic picture contains the true edge, which
-flatters both methods: real footage decides.
-
-**Facts settled:** ORT's Linux package needs only glibc 2.28 / GLIBCXX 3.4.22, so **it fits Rocky 9**
-(libonnxruntime 33 MB + CUDA provider 284 MB; the CUDA 13 libraries are NOT in the tarball: 1.6 GB
-from PyPI wheels, found via LD_LIBRARY_PATH; total ORT+CUDA ~2 GB on disk; MIT licence + third-party
-notices). **The ORT 1.31 headers need C++17** (even the C API header): ORT must sit in its own C++17
-translation units (the plugin is C++14 for OFX's auto_ptr). The macOS package
-(`onnxruntime-osx-arm64-1.31.0.tgz`, 36 MB) contains the CoreML EP (`AppendExecutionProvider("CoreML",
-{})`, untested). Models and checksums are in the agent's `models.json`: vitmatte-small ONNX 104 MB,
-base 387 MB, birefnet-lite 224 MB (fp16 115 MB), birefnet 973 MB (fp16 490 MB); BiRefNet card:
-trained on DIS-TR, licence MIT.
-
-**Reading against the proposed gate (decision 28):** inline looks feasible on this class of GPU:
-a warm HD frame 80-150 ms and UHD 200-400 ms are far inside "about 1 s / never 3 s" and similar to
-the heavy plugin-1 chains. What the numbers cannot show: contention with Flame's own GPU use, the
-CUDA 13.4 runtime against Flame's driver 580 (minor-version compatibility, untested: may need a
-13.0/13.2 runtime), blocking Flame's UI for 0.1-0.4 s per frame, first-frame cost (~0.7 s). Those are
-the target-host runs and the phase 1 spike.
-
-**Consequences for the design (decision 30):** B1 needs a "keep the input where it was fine" rule:
-the ML result hurts a clean matte (Mix, "only where the matte was grey", or run only where Analyze
-sees defects); a wider band, or a trimap rule for faint hair, so hair beyond the band survives;
-GPU memory limits (`gpu_mem_limit`, arena strategy) before it can share the card with Flame; the
-colour conversion into the model (the bench used clamp + gamma 2.2; OPEN).
-
-## Licences (verify each at its source before shipping; status as of 2026-10-23)
-
-| Model | Code | Weights | Status |
-|---|---|---|---|
-| BiRefNet | MIT (repo LICENSE read) | MIT per listings | the clear one; its training data's terms NOT checked |
-| DiffMatte | MIT (repo) | UNVERIFIED; very likely trained on Composition-1k like ViTMatte | check the README / paper |
-| ViTMatte | **MIT, verified** (LICENSE file: "Copyright (c) 2023 Hust Vision Lab") | HF card `hustvl/vitmatte-small-composition-1k`: tag Apache-2.0, "trained on Composition-1k", no restrictions stated. **Composition-1k = Adobe's Deep Image Matting dataset (CVPR 2017).** Secondary sources (LibreViTMattes card, which converts this checkpoint; FBA Matting repo) say Adobe's licence agreement allows models trained on it to be used and distributed only non-commercially, not sold, with the CVPR 2017 attribution kept; they say it binds the checkpoint, not the MIT code or independently trained weights | **UNVERIFIED at the source: Adobe's agreement text is not public** (the dataset is on request, contact in the dataset repos); whether "use" covers output on paid work is unknown. Backbone and its pretraining data not named on the pages read |
-| ONNX Runtime | MIT | n/a | UNVERIFIED: read the shipped licence |
-
-**Decision 31 (PROPOSED, 2026-10-23): use ViTMatte for evaluation only** (phase 0 and the spike):
-no weights in the repo or any release, ever; the plugin fetches models for the user behind a
-licence gate that shows the model's terms (LTX's approach). Decide the licence question only if
-ML clearly beats Snap to Image in the benchmark: then ask Adobe (or counsel) about commercial use
-of a Composition-1k-trained model, or pick a model with clean provenance. Most trimap matting
-models (FBA, MGMatting, ViTMatte, DiffMatte probably) share this dataset; BiRefNet does not. The
-model file is swappable: nothing in the plugin design depends on ViTMatte. Not legal advice.
-
-Anything non-commercial can only be a user-downloaded model behind a licence gate (LTX's
-approach), never bundled. The MatAnyone 2 quality evaluator (locates defects without ground
-truth) is on the watch list only: checkpoint unreleased, non-commercial.
+Moved to `LICENCES.md` (table, precedent, Baselight findings). Decision 31 stays here.
 
 ## Runtime facts (2026-10-23, from the web; UNVERIFIED unless a line says otherwise)
 

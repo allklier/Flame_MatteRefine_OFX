@@ -26,6 +26,7 @@ namespace mr {
 namespace {
 std::atomic<int> gLevel{int(LogLevel::Info)};
 thread_local std::string tNode = "-";
+char gComponent[16] = "ofx";
 
 const char* levelName(LogLevel l) {
   switch (l) {
@@ -89,6 +90,10 @@ void rotateLogs(size_t maxBytes, int keep) {
   std::rename(base.c_str(), (base + ".1").c_str());
 }
 
+void setLogComponent(const char* name) {
+  std::snprintf(gComponent, sizeof gComponent, "%s", name && *name ? name : "ofx");
+}
+
 void logAt(LogLevel level, const char* fmt, ...) {
   if (!logEnabled(level)) return;
   char msg[4096];
@@ -105,9 +110,9 @@ void logAt(LogLevel level, const char* fmt, ...) {
   localtime_r(&secs, &tm);
   char line[4400];
   const int n = std::snprintf(line, sizeof line,
-                              "%04d-%02d-%02d %02d:%02d:%02d.%03d %s ofx[%d/%ld] node=%s | %s\n",
+                              "%04d-%02d-%02d %02d:%02d:%02d.%03d %s %s[%d/%ld] node=%s | %s\n",
                               tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min,
-                              tm.tm_sec, ms, levelName(level), int(getpid()),
+                              tm.tm_sec, ms, levelName(level), gComponent, int(getpid()),
                               threadId(), tNode.c_str(), msg);
   if (n <= 0) return;
 

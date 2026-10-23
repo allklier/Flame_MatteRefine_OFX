@@ -1,0 +1,31 @@
+TEMPORAL TEST (Matte Refine ML, B4): can Flame give the node neighbour frames?
+================================================================================
+Written 2026-10-23. About 20 minutes. The build is deployed on akflame5: RESTART FLAME first.
+NOTE: the plugin now declares "temporal clip access" even when Temporal is off. Please also check that the node still
+behaves as before with Temporal OFF (scrub, Smart Fill, Edge Refine): that is part of this test.
+
+NEW  Column "Temporal" (before Smart Fill): Enable (off) · Frames (+-1 / +-2 frame) · Strength 1 · Band px 6.
+  It smooths the matte edge flicker by looking at the neighbour frames (warped by optical flow) and only changes the edge
+  band; holes that flicker are decided by a majority. Chain: Temporal -> Smart Fill -> Edge Refine.
+
+THE QUESTIONS (answers come from the log lines, ~/.cache/matte-refine/logs/matte-refine.log):
+  1. At load: "host: temporalClipAccess yes|NO".
+  2. "getFramesNeeded: first call ..." appears? (If never: Flame does not call it.)
+  3. Per frame "temporal:" line: for each neighbour a status: used / no image / threw / ... and "host X ms" = Flame's cost of
+     fetching it. Any "SAME PIXELS AS THE CENTRE" means Flame ignored the time. Footer "the host returned no neighbour
+     frames" = every fetch failed.
+  4. Does changing something on frame t+1 upstream make frame t render again (cache)?
+
+TESTS
+  A. Synthetic: ~/MatteRefine_build/demo/ml/temporal_rgb.0000-0008.exr (picture) and temporal_matte.0000-0008.exr (matte),
+     9-frame sequences (import each as a clip; picture on the front, matte on the second socket).
+     Temporal OFF: the edge jitters and speckles every frame, a hole in the torso flickers.
+     Temporal ON (+-1): the edge flicker should drop by about half (core numbers: -56 %), holes mostly stay.
+     +-2 frames: more smoothing (-69 %), slower. Compare by playing the clip back and by looking at the View = Changes.
+  B. Your real shot with an LTX matte (the Log3G10 kitchen or the bike clip): play 20+ frames, Temporal on / off.
+     Edge flicker lower? Any lag, ghosting or edge drift on moving parts? Hair, hands?
+  C. Speed: scrub and Batch Render a range, K=1 and 2: time per frame, does Flame stay responsive?
+     (BFD numbers, HD: Temporal about 75 ms for +-1, 130 ms for +-2, plus Flame's fetch per neighbour.)
+  D. First and last frame of the clip (fewer neighbours): no error?
+  E. Temporal + Smart Fill + Edge Refine all on: still fine?
+Then Collect Logs and tell the assistant "temporal test done" (plus what you saw).

@@ -1,0 +1,68 @@
+FLAME CONTENTION TEST FOR MATTE REFINE ML (ViTMatte, phase 0)
+=============================================================
+Written 2026-10-23. Takes about 12 minutes. Do it on akflame5, in a terminal there:
+
+    cd ~/MatteRefine_build/mlbench
+
+WHAT THIS TESTS
+  A benchmark loop runs ViTMatte frames on the GPU continuously in the background (harder than a
+  real plugin, which only runs when Flame evaluates the node), while you use Flame normally.
+  - If Flame stays smooth under this load, running the model inline in the plugin is safe.
+  - The log also shows how much Flame slows the model down (its frame time per phase) and how much
+    GPU memory Flame itself uses.
+  It cannot show whether the plugin would block Flame's own render thread: that needs the spike
+  plugin (ofx/ml/CLAUDE.md, phase 1).
+  Reference (Flame NOT running, GPU idle): ViTMatte-small, HD, "all" scene, 12 tiles of 512:
+  about 131-134 ms per frame; UHD "all": about 328 ms.
+
+BEFORE YOU START
+  1. Flame is running on akflame5 (it was not running when this was written).
+  2. Have ready the heaviest setup you would realistically run next to this node: for example a UHD
+     Batch with GPU effects (Action, Sapphire, a keyer...).
+  3. Do not run LTX at the same time: it uses most of the GPU memory and would confuse the numbers.
+
+THE TEST (the loop keeps running through all phases; type the "mark" line at the START of each
+phase, so the log can be matched to what you did)
+
+  ./contention.sh start hd                  start the loop (1920x1080) and the GPU log
+
+  ./contention.sh mark "flame idle"         phase 1, 60 s: Flame open, do nothing
+  ./contention.sh mark "playback"           phase 2, 90 s: play your heavy setup in a loop, real time
+  ./contention.sh mark "interactive"        phase 3, 60 s: scrub, pan/zoom the viewer, change the
+                                            parameters of a GPU effect
+  ./contention.sh mark "render"             phase 4, until done or 2 min: Batch Render (or timeline
+                                            render) of the heavy setup
+
+  ./contention.sh stop                      stop the loop and the GPU log
+
+  Optional UHD pass (5 min): ./contention.sh start uhd, then phases 2 and 4 again, then stop.
+
+  ./contention.sh status                    shows whether it runs, the last frame time, GPU use.
+  If Flame ever misbehaves: ./contention.sh stop (ends within a second or two).
+
+NOTES TO WRITE DOWN (fill in, then give them to the assistant together with this folder's results)
+
+  Phase 1 idle:         Flame GPU memory (from the log), anything odd?
+  Phase 2 playback:     dropped frames? viewer FPS? smooth / stutters
+  Phase 3 interactive:  UI lag or stutter? how bad (none / small / annoying / unusable)
+  Phase 4 render:       render time ____ (normal time without the loop ____), UI responsive?
+  Messages or errors from Flame about the GPU or memory: ____
+  UHD pass (optional):  same questions
+
+RESULTS (written automatically)
+  ~/MatteRefine_build/mlbench/contention/timeline.log   one line per loop pass: epoch + the tool's
+                                                        JSON (frame_ms_median, frame_ms_p95, ...)
+  ~/MatteRefine_build/mlbench/contention/gpu.csv        every second: time, GPU utilisation %, MiB used
+  ~/MatteRefine_build/mlbench/contention/marks.log      your phase marks with epoch times
+  ~/MatteRefine_build/mlbench/contention/stderr.txt     warnings from ONNX Runtime
+
+WHAT HAPPENS NEXT
+  Tell the assistant "contention test done" with your notes. It reads the three logs, compares the
+  model's frame time in each phase with the idle reference above, reads Flame's GPU memory use from
+  the GPU log, and writes the table plus your observations into ofx/ml/CLAUDE.md (section "Phase 0
+  results"). Then: decision 28 (inline vs worker) can be made on measured data.
+
+FILES
+  The script: ofx/ml/package/contention.sh in the repo (copy on akflame5: ~/MatteRefine_build/mlbench/
+  contention.sh). It writes only under ~/MatteRefine_build/mlbench/contention.
+  Context: ofx/ml/CLAUDE.md (plan, decisions 27-31, Phase 0 results for BFD and akflame5).

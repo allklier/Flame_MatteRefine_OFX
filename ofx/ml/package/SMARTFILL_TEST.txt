@@ -1,0 +1,24 @@
+SMART FILL TEST (Matte Refine ML, B3)
+=====================================
+Written 2026-10-23. About 20 minutes. The build is deployed on akflame5 (same symlink; the runner was stopped):
+RESTART FLAME first. The node has a new column "Smart Fill" and a new View "Holes".
+
+WHAT IT DOES  A segmentation model (BiRefNet) and the picture colour decide which holes in the matte are defects
+  (filled) and which are real gaps, e.g. between an arm and the body (kept). Plugin 1's Fill Holes can only go by size.
+  Chain: matte -> Smart Fill -> Edge Refine. Wiring as before: picture on the front, matte on the second socket.
+
+CONTROLS  Enable (off by default) · Subject Threshold 0.6 (higher keeps more holes open) · Max Hole % 10 (0 = no limit)
+  · Segmentation Lite / Full (Full is about 2x slower and more robust on low-contrast pictures).
+
+TESTS  Use your real shots with an LTX matte that has holes (the Log3G10 kitchen one, the bike clip).
+  1. Enable Smart Fill, View = Holes: green = holes it filled, red = holes it kept, grey = the result.
+     Does it fill the real defects and keep the real gaps (arm / body, between legs, a handle)? Describe misses.
+  2. View = Matte, compare Smart Fill on/off. Then plugin 1's Fill Holes (the other node) on the same matte for comparison.
+  3. Subject Threshold 0.4 / 0.6 / 0.8: how do the filled / kept holes change?
+  4. Segmentation Full vs Lite on a low-contrast shot: any difference?
+  5. Speed: scrub 20+ frames, then Batch Render a range. Time per frame, UI responsive?  (BFD numbers: HD about 150 ms
+     for Smart Fill, plus Edge Refine about 150 ms on top; first frame 3-4 s while models load.)
+  6. First frame after starting Flame: how long, any error footer?
+  Then Collect Logs (Model & Support column) and tell the assistant "smart fill test done".
+LOG  ~/.cache/matte-refine/logs/matte-refine.log: one "smart fill:" line per frame (holes found / filled / kept /
+  too large, runner ms, model), and the runner session lines (arena limit applied or not).

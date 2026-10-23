@@ -118,6 +118,17 @@ add_library(mr_synth_lib STATIC ofx/tools/synth.cpp)
 target_include_directories(mr_synth_lib PUBLIC ofx/tools)
 add_executable(mr_synth ofx/tools/mr_synth.cpp)
 target_link_libraries(mr_synth PRIVATE mr_synth_lib)
+# USERGUIDE.md's pictures (docs/images/README.txt): not in the default build; needs zlib. With
+# MR_BUILD_ML also the ML images (the ML cores and ONNX Runtime; the targets come from ofx/ml).
+find_package(ZLIB)
+if(ZLIB_FOUND)
+  add_executable(mr_guide_images EXCLUDE_FROM_ALL ofx/tools/mr_guide_images.cpp)
+  target_link_libraries(mr_guide_images PRIVATE mr_ops mr_synth_lib ZLIB::ZLIB)
+  if(MR_BUILD_ML)
+    target_compile_definitions(mr_guide_images PRIVATE MR_GUIDE_ML=1)
+    target_link_libraries(mr_guide_images PRIVATE mr_ml_ort mr_ml_chain mr_ml_smart_fill mr_ml_temporal)
+  endif()
+endif()
 
 enable_testing()
 add_executable(test_fill_holes ofx/tests/test_fill_holes.cpp)

@@ -19,7 +19,8 @@ Tags: **DECIDED** (maintainer approved), **PROPOSED** (recommended, not yet appr
 | `CLAUDE.md` (this) | goal, architecture, cross-cutting decisions, decision index, building / testing / releasing, roadmap, dead ends, conventions |
 | `ofx/CLAUDE.md` | the plugin layer: inputs, colour and views, render rules, platforms, Flame host behaviour, layout, logging and support |
 | `ofx/src/ops/CLAUDE.md` | the operations and their shared code: algorithms, params, measurements, synthetic mattes |
-| `ofx/ml/CLAUDE.md` | Matte Refine ML, the second plugin: scope, plan, runtime, licences, risks (nothing built yet) |
+| `ofx/merge/CLAUDE.md` | Matte Merge, the third plugin: two mattes (main + detail, e.g. LTX hair) in, one combined matte out; plan only |
+| `ofx/ml/CLAUDE.md` | Matte Refine ML, the second plugin: scope, plan, runtime, licences, risks; benchmark data in `ofx/ml/PHASE0_RESULTS.md`, licences in `ofx/ml/LICENCES.md` (plugin not built yet) |
 
 Claude Code loads a nested `CLAUDE.md` when you work in its folder; this root file is always read,
 so keep it short and put detail where it belongs.
@@ -27,7 +28,7 @@ Code comments cite sections by title ("Plugin 1 operations", "Flame host behavio
 support", "Synthetic mattes"): grep the three files for the title.
 
 **Decision index** (numbers are stable; in `ofx/CLAUDE.md`: 4, 5, 6, 11, 13, 22, 23, 24, 25; in
-`ofx/src/ops/CLAUDE.md`: 7-10, 12, 15, 16, 20, 21, 26; in `ofx/ml/CLAUDE.md`: 29, 30, 31; in this file: 1, 2, 3, 14, 17, 18, 19, 27, 28):
+`ofx/src/ops/CLAUDE.md`: 7-10, 12, 15, 16, 20, 21, 26; in `ofx/ml/CLAUDE.md`: 29-36; in this file: 1, 2, 3, 14, 17, 18, 19, 27, 28):
 
 | # | Decision | In |
 |---|---|---|
@@ -51,7 +52,13 @@ support", "Synthetic mattes"): grep the three files for the title.
 | 24 | Edge Colour Unmix errors on a non-linear picture | ofx |
 | 25 | "Foreground Colour" is shown as "Edge Colour Unmix" | ofx |
 | 26 | Edge Colour Unmix "Ignore Outer px" (grown mattes) | ops |
-| 29, 30, 31 | ML runtime (ONNX Runtime, proposed); band-only tiled processing; ViTMatte for evaluation only (licence) | ml |
+| 29, 30, 31 | ML runtime (ONNX Runtime, proposed); band-only tiled processing; ViTMatte usable behind the licence gate, not flagged non-commercial (decided) | ml |
+| 37 | third plugin Matte Merge: main matte + detail matte (LTX hair) -> combined; separate plugin, classical first, same repo | root |
+| 36 | ML feature plan: B2 as a model choice, slow behind a Quality switch, BiRefNet 24 GB rule, B3 before B4 | ml |
+| 35 | Matte Refine ML is a filter (picture on the front, matte in its alpha); supersedes 22 for ML only | ml |
+| 34 | ML picture colour = Auto (Flame converts to Rec.709 display) / Bypass; no colour maths in the plugin | ml |
+| 33 | Matte Refine ML on macOS deferred (CoreML via ORT too slow); the Mac ships plugin 1 only | ml |
+| 32 | a synchronous runner process owns ORT / CUDA / models (Flame ships its own ORT); no GPU library in the .ofx | ml |
 
 ## Goal
 
@@ -133,6 +140,12 @@ vendored copy) plus the two 1.5.1 colour headers (23, `VENDORED.txt`).
 - **28. DECIDED (user, 2026-10-23): ML models inline in `render()` first**, an offline worker
   (as LTX Alpha Gen) only if Flame locks up too much or it is too slow; decided on measurements
   (phase 0 benchmark, phase 1 Flame spike), see `ofx/ml/CLAUDE.md`.
+- **37. DECIDED (user, 2026-10-23): a third plugin, Matte Merge: a main matte plus a detail matte in, one combined
+  matte out.** The main matte (roto, a guided model, a keyer) keeps the subject and body edge; the detail matte (typically
+  LTX Alpha Gen, which is hard to aim at one object) supplies hair and fine detail near the main matte's edge only. Why a
+  separate plugin: a different workflow (two mattes); plugin 1 stays one matte in / one out, plugin 2 model-based. Same
+  repo and CMake project as 27 (own bundle, option default OFF), classical first (no model, no runner). Still decision 17:
+  the main matte stays the source. Method, inputs risk and plan: `ofx/merge/CLAUDE.md` (PROPOSED, to be validated).
 - **19. DECIDED (user, 2026-10-22): UI = one node, two tabs, one operation per column.** An op =
   Enable + at most 4 controls, off by default; paired ops share a column. Tab 1 "Fill & Core":
   Matte (View, Version) · Clean & Crush · Fill Holes · Fill Holes Edges · Solid Core · Support
@@ -182,6 +195,10 @@ vendored copy) plus the two 1.5.1 colour headers (23, `VENDORED.txt`).
 - **Matte Refine ML** (18, 27, 28): planned in `ofx/ml/CLAUDE.md` (B1 ViTMatte edge refine, B2
   DiffMatte, B3 segmentation-guided Fill Holes, B4 temporal). Next step there: phase 0, the
   benchmark tool, then a Flame spike. Decision 12 became B1/B2.
+- **LTX Alpha Gen: simplify its colour handling the same way** (user wish, 2026-10-23): Auto / Bypass through
+  Flame's preferred-colourspace request instead of its Input colour dropdown (recorded in LTX's roadmap too;
+  decision 34 in `ofx/ml/CLAUDE.md` has the verified mechanism).
+- **Matte Merge** (37): third plugin, plan in `ofx/merge/CLAUDE.md`; first step a Flame layout probe for picture + two mattes.
 - macOS: a Flame test and `package_release_mac.sh` (13).
 - Not planned (14): a matte cache, a Process button.
 - Later, if needed: user-settable op order; a temporal option for Fill Holes (a hole crossing

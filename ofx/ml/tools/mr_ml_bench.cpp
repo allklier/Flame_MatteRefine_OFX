@@ -10,14 +10,14 @@
 // trimap (B1, ViTMatte): trimap from the matte's signed distance to its 0.5 contour (core =
 //   deeper than band px, clear = beyond band px, unknown between); tiles of tile x tile (stride
 //   tile - overlap, clamped inside the frame) that contain unknown pixels go through the model.
-//   Input [1,4,T,T]: RGB (display-encoded: clamp 0-1, x^(1/2.2)) normalised (x - 0.5) / 0.5,
+//   Input [1,4,T,T]: RGB (display-referred, clamped 0-1) normalised (x - 0.5) / 0.5,
 //   trimap 0 / 0.5 / 1 not normalised (transformers VitMatteImageProcessor: rescale + normalise
 //   the image, rescale only the trimap, concatenate). T a multiple of 32 (size_divisibility).
 //   Tiles overlap: results are averaged with a linear ramp over `overlap` px at inner tile sides.
 //   Blend back: w = 1 where |sd| <= band / 2, falling linearly to 0 at |sd| = band; out = in +
 //   w (ml - in); beyond the band out = in, bit-identical.
 // segment (B3, BiRefNet): the whole picture bilinear-resized to the model's size (1024 x 1024),
-//   ImageNet mean / std on the display-encoded picture; output logits -> sigmoid -> bilinear back
+//   ImageNet mean / std on the clamped (display-referred) picture; output logits -> sigmoid -> bilinear back
 //   to w x h (same size as the input).
 #include <onnxruntime_cxx_api.h>
 
@@ -34,12 +34,17 @@
 #include <string>
 #include <vector>
 
+#include "edge_refine.h"
 #include "ops/edge_field.h"
 #include "ops/snap_to_image.h"
 #include "synth.h"
 
 namespace {
 
+using mr::ml::Tile;
+using mr::ml::selectTiles;
+using mr::ml::tileWeight;
+std::vector<float> makeTrimap(const std::vector<float>& sd, double band) { return mr::ml::trimapFromDistance(sd, band); }
 using Clock = std::chrono::steady_clock;
 double msSince(Clock::time_point t) {
   return std::chrono::duration<double, std::milli>(Clock::now() - t).count();
@@ -84,51 +89,6 @@ Frame loadFrame(const Args& a) {
     f.truth = std::move(s.truth);
   }
   return f;
-}
-
-float display(float v) { return std::pow(std::min(std::max(v, 0.0f), 1.0f), 1.0f / 2.2f); }
-
-// --- trimap and tiles -------------------------------------------------------------------------
-struct Tile { int x, y; };
-
-std::vector<int> positions(int n, int tile, int stride) {
-  std::vector<int> p;
-  for (int x = 0;; x += stride) {
-    if (x + tile >= n) { p.push_back(std::max(n - tile, 0)); break; }
-    p.push_back(x);
-  }
-  return p;
-}
-
-// trimap: 0 clear, 1 core, 0.5 unknown.
-std::vector<float> makeTrimap(const std::vector<float>& sd, double band) {
-  std::vector<float> t(sd.size());
-  for (size_t i = 0; i < sd.size(); ++i) t[i] = sd[i] > band ? 1.0f : sd[i] < -band ? 0.0f : 0.5f;
-  return t;
-}
-
-std::vector<Tile> selectTiles(const std::vector<float>& tri, int w, int h, int tile, int overlap) {
-  std::vector<Tile> out;
-  const int stride = std::max(tile - overlap, 1);
-  for (int y : positions(h, tile, stride))
-    for (int x : positions(w, tile, stride)) {
-      bool any = false;
-      for (int yy = y; yy < std::min(y + tile, h) && !any; ++yy)
-        for (int xx = x; xx < std::min(x + tile, w); ++xx)
-          if (tri[size_t(yy) * w + xx] == 0.5f) { any = true; break; }
-      if (any) out.push_back({x, y});
-    }
-  return out;
-}
-
-// Weight of a tile pixel: a ramp over `overlap` px towards each tile side that is not the frame
-// edge, never 0 (so a selected tile covers all its pixels).
-float tileWeight(const Tile& t, int tile, int overlap, int w, int h, int lx, int ly) {
-  auto ramp = [&](int d, bool frameEdge) {
-    return frameEdge || overlap <= 0 ? 1.0f : std::min(1.0f, (d + 0.5f) / overlap);
-  };
-  return ramp(lx, t.x == 0) * ramp(tile - 1 - lx, t.x + tile >= w) * ramp(ly, t.y == 0) *
-         ramp(tile - 1 - ly, t.y + tile >= h);
 }
 
 // --- ONNX Runtime -----------------------------------------------------------------------------
@@ -231,7 +191,8 @@ long procStatusKiB(const char* key) {  // Linux /proc/self/status; -1 elsewhere
 // --- processing -------------------------------------------------------------------------------
 struct StageMs { double pre = 0, run = 0, post = 0; };
 
-// B1: returns the model's band result for the frame (only valid where the weight sum > 0).
+// B1: returns the model's band result for the frame (only valid where the weight sum > 0), via
+// the shared tiling in edge_refine (one implementation with the plugin).
 std::vector<float> refineTiles(Model& m, const Frame& f, const std::vector<float>& tri,
                                const std::vector<Tile>& tiles, const Args& a,
                                std::vector<StageMs>* perTile) {
@@ -241,25 +202,13 @@ std::vector<float> refineTiles(Model& m, const Frame& f, const std::vector<float
   for (const Tile& t : tiles) {
     StageMs st;
     auto t0 = Clock::now();
-    const size_t plane = size_t(T) * T;
-    for (int ly = 0; ly < T; ++ly)
-      for (int lx = 0; lx < T; ++lx) {
-        const size_t i = size_t(std::min(t.y + ly, h - 1)) * w + std::min(t.x + lx, w - 1), o = size_t(ly) * T + lx;
-        for (int c = 0; c < 3; ++c) input[c * plane + o] = (display(f.rgb[i * 3 + c]) - 0.5f) / 0.5f;
-        input[3 * plane + o] = tri[i];
-      }
+    mr::ml::prepareTile(f.rgb.data(), tri.data(), w, h, t, T, input.data());
     st.pre = msSince(t0);
     t0 = Clock::now();
     std::vector<float> alpha = run(m, input, shape);
     st.run = msSince(t0);
     t0 = Clock::now();
-    for (int ly = 0; ly < T && t.y + ly < h; ++ly)
-      for (int lx = 0; lx < T && t.x + lx < w; ++lx) {
-        const float wt = tileWeight(t, T, a.overlap, w, h, lx, ly);
-        const size_t i = size_t(t.y + ly) * w + t.x + lx;
-        acc[i] += wt * std::min(std::max(alpha[size_t(ly) * T + lx], 0.0f), 1.0f);
-        wsum[i] += wt;
-      }
+    mr::ml::accumulateTile(alpha.data(), t, T, a.overlap, w, h, acc.data(), wsum.data());
     st.post = msSince(t0);
     if (perTile) perTile->push_back(st);
   }
@@ -269,13 +218,8 @@ std::vector<float> refineTiles(Model& m, const Frame& f, const std::vector<float
 
 std::vector<float> blendBack(const std::vector<float>& in, const std::vector<float>& ml,
                              const std::vector<float>& sd, double band) {
-  std::vector<float> out(in);
-  for (size_t i = 0; i < in.size(); ++i) {
-    const double d = std::fabs(sd[i]);
-    if (d >= band || ml[i] < 0) continue;
-    const double wt = d <= band / 2 ? 1.0 : (band - d) / (band / 2);
-    out[i] = float(in[i] + wt * (ml[i] - in[i]));
-  }
+  std::vector<float> out(in.size());
+  mr::ml::blendBack(in.data(), ml.data(), sd.data(), in.size(), band, 1.0, false, out.data());
   return out;
 }
 
@@ -298,7 +242,7 @@ void resizeBilinear(const float* src, int sw, int sh, int ch, float* dst, int dw
 std::vector<float> segment(Model& m, const Frame& f, int S, StageMs* st) {
   auto t0 = Clock::now();
   std::vector<float> disp(f.rgb.size()), small(size_t(S) * S * 3), input(size_t(3) * S * S);
-  for (size_t i = 0; i < disp.size(); ++i) disp[i] = display(f.rgb[i]);
+  for (size_t i = 0; i < disp.size(); ++i) disp[i] = mr::ml::clampPicture(f.rgb[i]);
   resizeBilinear(disp.data(), f.w, f.h, 3, small.data(), S, S);
   const float mean[3] = {0.485f, 0.456f, 0.406f}, sdv[3] = {0.229f, 0.224f, 0.225f};
   for (size_t i = 0; i < size_t(S) * S; ++i)
