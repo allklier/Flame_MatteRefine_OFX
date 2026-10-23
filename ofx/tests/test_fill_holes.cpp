@@ -6,9 +6,141 @@
 #include <vector>
 
 #include "ops/fill_holes.h"
+#include "ops/morphology.h"
+#include "synth.h"  // the synthetic scenes (mr_synth_lib)
 
 using mr::FillHolesParams;
 using mr::FillHolesStats;
+
+// The implementation before the run-based rewrite (2026-10-23), verbatim, as the reference
+// for testEquivalentToPrevious: the rewrite must give the same floats and stats.
+namespace old_ {
+using mr::Mask;
+using mr::dilate;
+using mr::FillHolesParams;
+using mr::FillHolesStats;
+namespace {
+
+// Morphological closing of s by a disc of radius r: dilate, then erode (outside the frame
+// counts as dilated, so the erosion doesn't eat in from the frame edges).
+Mask closeMask(const Mask& s, int w, int h, double r) {
+  Mask notDilated = dilate(s, w, h, r);
+  for (auto& v : notDilated) v = !v;
+  const Mask eroded = dilate(notDilated, w, h, r);  // the erosion's complement
+  Mask c(s.size());
+  for (size_t i = 0; i < s.size(); ++i) c[i] = s[i] || !eroded[i];
+  return c;
+}
+
+}  // namespace
+
+void fillHoles(const float* in, float* out, int w, int h, const FillHolesParams& p,
+               FillHolesStats* stats) {
+  FillHolesStats st;
+  const size_t n = size_t(std::max(w, 0)) * std::max(h, 0);
+  if (n == 0) {
+    if (stats) *stats = st;
+    return;
+  }
+
+  // Decision 9, step by step.
+  Mask solid(n);
+  for (size_t i = 0; i < n; ++i) {
+    solid[i] = in[i] >= p.threshold;
+    st.belowThreshold += !solid[i];
+  }
+  const double r = p.bridgePx / 2.0;  // a closing of radius r bridges gaps up to 2r wide
+  const Mask closed = r > 0.0 ? closeMask(solid, w, h, r) : solid;
+
+  // Outside: 4-connected flood over non-closed pixels from the open frame edges (scanline
+  // span fill: one stack entry per run of pixels, not per pixel).
+  Mask outside(n);
+  auto open = [&](size_t i) { return !closed[i] && !outside[i]; };
+  std::vector<std::pair<int, int>> stack;
+  auto seed = [&](int x, int y) {
+    if (open(size_t(y) * w + x)) stack.emplace_back(x, y);
+  };
+  if (!p.closedTop)
+    for (int x = 0; x < w; ++x) seed(x, 0);
+  if (!p.closedBottom)
+    for (int x = 0; x < w; ++x) seed(x, h - 1);
+  if (!p.closedLeft)
+    for (int y = 0; y < h; ++y) seed(0, y);
+  if (!p.closedRight)
+    for (int y = 0; y < h; ++y) seed(w - 1, y);
+  while (!stack.empty()) {
+    const int x = stack.back().first, y = stack.back().second;
+    stack.pop_back();
+    const size_t row = size_t(y) * w;
+    if (!open(row + x)) continue;
+    int l = x, r = x;
+    while (l > 0 && open(row + l - 1)) --l;
+    while (r + 1 < w && open(row + r + 1)) ++r;
+    std::fill(&outside[row + l], &outside[row + r] + 1, uint8_t(1));
+    st.outsidePixels += r - l + 1;
+    for (const int ny : {y - 1, y + 1}) {
+      if (ny < 0 || ny >= h) continue;
+      const size_t nrow = size_t(ny) * w;
+      for (int k = l; k <= r; ++k)  // one seed per run of open pixels next to the span
+        if (open(nrow + k) && (k == l || !open(nrow + k - 1))) stack.emplace_back(k, ny);
+    }
+  }
+
+  // Candidates: not solid and not outside, as 4-connected components.
+  const double maxArea = p.maxHolePercent > 0.0 ? p.maxHolePercent / 100.0 * double(n) : 0.0;
+  Mask fill(n), seen(n);
+  std::vector<int> comp;
+  for (size_t start = 0; start < n; ++start) {
+    if (solid[start] || outside[start] || seen[start]) continue;
+    comp.clear();
+    comp.push_back(int(start));
+    seen[start] = 1;
+    bool hasCore = false, touchesOutside = false;
+    for (size_t head = 0; head < comp.size(); ++head) {
+      const int i = comp[head], x = i % w, y = i / w;
+      hasCore |= !closed[i];
+      const int nb[4] = {x > 0 ? i - 1 : -1, x + 1 < w ? i + 1 : -1, y > 0 ? i - w : -1,
+                         y + 1 < h ? i + w : -1};
+      for (int j : nb) {
+        if (j < 0) continue;
+        if (outside[j]) {
+          touchesOutside = true;
+        } else if (!solid[j] && !seen[j]) {
+          seen[j] = 1;
+          comp.push_back(j);
+        }
+      }
+    }
+    // All closed and touching the outside: an outer notch the closing filled, i.e. the edge.
+    if (!hasCore && touchesOutside) {
+      ++st.notchesKept;
+      continue;
+    }
+    if (maxArea > 0.0 && double(comp.size()) > maxArea) {
+      ++st.holesTooLarge;
+      continue;
+    }
+    ++st.holesFilled;
+    for (int i : comp) fill[i] = 1;
+  }
+
+  // Rim: grow the fill into the solid's soft inner rim (solid pixels only, so never into the
+  // outside or into a hole left open).
+  if (p.rimPx > 0.0 && st.holesFilled > 0) {
+    const Mask grown = dilate(fill, w, h, p.rimPx);
+    for (size_t i = 0; i < n; ++i) fill[i] = fill[i] || (grown[i] && solid[i]);
+  }
+
+  for (size_t i = 0; i < n; ++i) {
+    const bool lift = fill[i] && in[i] < 1.0f;
+    st.pixelsChanged += lift;
+    out[i] = lift ? 1.0f : in[i];
+  }
+  if (stats) *stats = st;
+}
+
+}  // namespace old_
+
 
 namespace {
 
@@ -308,6 +440,119 @@ void testAgainstReference() {
   CHECK(bad == 0);
 }
 
+// The run-based rewrite against the previous implementation (old_): every float and every
+// stat equal, on the synthetic scenes and on random noisy mattes (both dilation paths of the
+// closing and the rim, threaded and single-band sizes, closed edges, in place).
+bool sameStats(const FillHolesStats& a, const FillHolesStats& b) {
+  return a.holesFilled == b.holesFilled && a.holesTooLarge == b.holesTooLarge &&
+         a.notchesKept == b.notchesKept && a.pixelsChanged == b.pixelsChanged &&
+         a.belowThreshold == b.belowThreshold && a.outsidePixels == b.outsidePixels;
+}
+
+// Returns the number of differing pixels plus 1 if the stats differ; checks in place too.
+long compareWithPrevious(const std::vector<float>& in, int w, int h, const FillHolesParams& p) {
+  std::vector<float> a(in.size()), b(in.size());
+  FillHolesStats sa, sb;
+  old_::fillHoles(in.data(), a.data(), w, h, p, &sa);
+  mr::fillHoles(in.data(), b.data(), w, h, p, &sb);
+  long bad = !sameStats(sa, sb);
+  for (size_t i = 0; i < in.size(); ++i) bad += !(a[i] == b[i]);
+  std::vector<float> c = in;
+  mr::fillHoles(c.data(), c.data(), w, h, p, &sb);
+  bad += !sameStats(sa, sb);
+  for (size_t i = 0; i < in.size(); ++i) bad += !(a[i] == c[i]);
+  return bad;
+}
+
+void testEquivalentToPrevious() {
+  int cases = 0, badCases = 0;
+  long long filledTotal = 0, notchTotal = 0;
+  for (const char* name : {"all", "holes", "specks"}) {
+    const synth::Scene s = synth::make(name, 1920, 1080);
+    for (int k = 0; k < 6; ++k) {
+      FillHolesParams p;
+      p.threshold = k % 2 ? 0.95f : 0.5f;
+      p.bridgePx = k / 2 == 1 ? 8.0 : k / 2 == 2 ? 3.0 : 0.0;
+      p.maxHolePercent = k == 4 ? 0.0 : 1.0;
+      p.closedBottom = k >= 3;
+      const long bad = compareWithPrevious(s.matte, s.w, s.h, p);
+      FillHolesStats st;
+      std::vector<float> o(s.matte.size());
+      mr::fillHoles(s.matte.data(), o.data(), s.w, s.h, p, &st);
+      filledTotal += st.holesFilled;
+      ++cases;
+      if (bad) {
+        ++badCases;
+        std::printf("  differs: %s case %d: %ld\n", name, k, bad);
+      }
+    }
+  }
+  std::mt19937 rng(2026);
+  std::uniform_real_distribution<float> u(0.0f, 1.0f);
+  for (int trial = 0; trial < 60; ++trial) {
+    // Sizes from tiny (one band) to a few hundred rows (several bands on threads).
+    const int w = trial % 3 == 0 ? 20 + int(rng() % 60) : 100 + int(rng() % 500);
+    const int h = trial % 3 == 0 ? 10 + int(rng() % 50) : 60 + int(rng() % 400);
+    std::vector<float> in(size_t(w) * h);
+    const int kind = trial % 4;  // 0 noise, 1 blobs with holes, 2 blobs + noise, 3 rings
+    for (auto& v : in) v = kind == 0 ? (u(rng) < 0.55f ? 1.0f : u(rng)) : u(rng) * 0.1f;
+    if (kind) {
+      const int blobs = 1 + int(rng() % 6);
+      for (int b = 0; b < blobs; ++b) {
+        const double cx = rng() % w, cy = rng() % h, r = 5 + rng() % (std::min(w, h) / 2 + 1);
+        const double soft = 0.5 + u(rng) * 4.0;
+        for (int y = 0; y < h; ++y)
+          for (int x = 0; x < w; ++x) {
+            const double d = std::hypot(x - cx, y - cy);
+            float a = float(std::min(1.0, std::max(0.0, (r - d) / soft)));
+            if (kind == 3 && d < r * 0.6) a = float(std::min(1.0, std::max(0.0, (d - r * 0.4) / soft)));
+            float& v = in[size_t(y) * w + x];
+            v = std::max(v, a);
+          }
+        for (int k = 0; k < 20; ++k) {  // holes, some grey
+          const double hx = cx + (u(rng) - 0.5) * r, hy = cy + (u(rng) - 0.5) * r;
+          const double hr = 0.5 + u(rng) * 6.0;
+          const float val = u(rng) < 0.5f ? 0.0f : u(rng);
+          for (int y = std::max(0, int(hy - hr)); y <= std::min(h - 1, int(hy + hr)); ++y)
+            for (int x = std::max(0, int(hx - hr)); x <= std::min(w - 1, int(hx + hr)); ++x)
+              if ((x - hx) * (x - hx) + (y - hy) * (y - hy) <= hr * hr) in[size_t(y) * w + x] = val;
+        }
+        if (kind == 3 && rng() % 2) {  // a gap through the ring
+          const int gx = int(cx), gw = 1 + int(rng() % 4);
+          for (int y = std::max(0, int(cy - r)); y < std::min(h, int(cy)); ++y)
+            for (int x = std::max(0, gx); x < std::min(w, gx + gw); ++x) in[size_t(y) * w + x] = 0.0f;
+        }
+      }
+      if (kind == 2)
+        for (auto& v : in)
+          if (u(rng) < 0.08f) v = u(rng);
+    }
+    FillHolesParams p;
+    p.threshold = trial % 5 == 0 ? 0.95f : 0.3f + 0.6f * u(rng);
+    p.bridgePx = trial % 3 == 0 ? 0.0 : trial % 3 == 1 ? 8.0 : 1.0 + (rng() % 12);
+    const double maxHole[3] = {0.0, 1.0, 50.0};
+    p.maxHolePercent = maxHole[trial % 3 == 2 ? (trial / 3) % 3 : trial % 3];
+    p.rimPx = (trial % 7) * 0.8;
+    p.closedLeft = rng() % 4 == 0, p.closedRight = rng() % 4 == 0, p.closedTop = rng() % 4 == 0,
+    p.closedBottom = rng() % 3 == 0;
+    if (trial % 11 == 0) p.closedLeft = p.closedRight = p.closedTop = p.closedBottom = true;
+    const long bad = compareWithPrevious(in, w, h, p);
+    FillHolesStats st;
+    std::vector<float> o(in.size());
+    mr::fillHoles(in.data(), o.data(), w, h, p, &st);
+    filledTotal += st.holesFilled;
+    notchTotal += st.notchesKept;
+    ++cases;
+    if (bad) {
+      ++badCases;
+      std::printf("  differs: random %d (%dx%d): %ld\n", trial, w, h, bad);
+    }
+  }
+  std::printf("equivalent to the previous implementation: %d of %d cases (%lld holes filled, "
+              "%lld notches kept in all)\n", cases - badCases, cases, filledTotal, notchTotal);
+  CHECK(badCases == 0);
+}
+
 void testEmpty() {
   Img in(1, 1, 0.0f);
   CHECK(run(in, FillHolesParams()).at(0, 0) == 0.0f);
@@ -353,6 +598,7 @@ int main() {
   testNeverLowers();
   testAgainstReference();
   testEmpty();
+  testEquivalentToPrevious();
   testTiming();
   std::printf("%s (%d failure(s))\n", failures ? "FAILED" : "OK", failures);
   return failures ? 1 : 0;

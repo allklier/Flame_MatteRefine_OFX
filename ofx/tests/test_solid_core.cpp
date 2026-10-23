@@ -8,6 +8,9 @@
 
 #include "edge_reference.h"
 #include "ops/solid_core.h"
+#include "old_edge_ops.h"
+#include "equivalence.h"
+#include "synth.h"
 
 using mr::SolidCoreParams;
 using mr::SolidCoreStats;
@@ -200,6 +203,52 @@ void testTiming() {
   CHECK(ms < 100.0);
 }
 
+// Equivalence with the code before the speed work (old_edge_ops.h): bit for bit, out of place
+// and in place, hard and soft, on the synthetic scenes at 1080 and on random mattes, sizes and
+// settings.
+void testEquivalence() {
+  long long cases = 0, bad = 0, active = 0, skipped = 0;
+  auto check = [&](const std::vector<float>& in, int w, int h, double depth, float edgeAt, double feather) {
+    SolidCoreParams p;
+    p.depthPx = depth;
+    p.edgeAt = edgeAt;
+    p.featherPx = feather;
+    old_::sc::SolidCoreParams q;
+    q.depthPx = depth;
+    q.edgeAt = edgeAt;
+    q.featherPx = feather;
+    std::vector<float> a(in.size()), b(in.size()), c = in;
+    SolidCoreStats sa, sc;
+    old_::sc::SolidCoreStats sb;
+    mr::solidCore(in.data(), a.data(), w, h, p, &sa);
+    old_::sc::solidCore(in.data(), b.data(), w, h, q, &sb);
+    mr::solidCore(c.data(), c.data(), w, h, p, &sc);  // in place
+    const long long d = eq::bitsDiffer(a.data(), b.data(), a.size()) + eq::bitsDiffer(c.data(), b.data(), c.size());
+    const bool same = d == 0 && sa.pixelsChanged == sb.pixelsChanged && sc.pixelsChanged == sb.pixelsChanged;
+    if (!same) std::printf("  differs: %dx%d depth %.2f at %.2f feather %.2f: %lld px\n", w, h, depth, edgeAt, feather, d);
+    ++cases;
+    bad += !same;
+    active += sb.pixelsChanged > 0;
+  };
+  const char* scenes[] = {"all", "mixed_edge", "eroded", "chatter", "holes"};
+  for (const char* name : scenes) {
+    const synth::Scene s = synth::make(name, 1920, 1080);
+    check(s.matte, 1920, 1080, 6.0, 0.5f, 2.0);
+    check(s.matte, 1920, 1080, 6.0, 0.5f, 0.0);
+    check(s.matte, 1920, 1080, 12.0, 0.3f, 4.0);
+    check(s.matte, 1920, 1080, 40.0, 0.9f, 3.0);  // the plain-distance fallback on noisy mattes
+  }
+  std::mt19937 rng(20261026);
+  std::uniform_real_distribution<double> u(0.0, 1.0);
+  for (int t = 0; t < 40; ++t) {
+    const int w = t < 4 ? 1 + t * 3 : 20 + int(u(rng) * 380), h = t < 4 ? 40 - t * 9 : 10 + int(u(rng) * 290);
+    const std::vector<float> m = eq::randomMatte(rng, w, h);
+    check(m, w, h, 0.5 + u(rng) * 8.0, float(0.01 + 0.6 * u(rng)), u(rng) < 0.3 ? 0.0 : u(rng) * 6.0);
+  }
+  std::printf("equivalence with the old solid core: %lld cases (%lld change pixels), %lld differ\n", cases, active, bad);
+  CHECK(bad == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -210,6 +259,7 @@ int main() {
   testAgainstBruteForce(0.0);
   testAgainstBruteForce(2.5);
   testSmoothCore();
+  testEquivalence();
   testTiming();
   std::printf("%s (%d failure(s))\n", failures ? "FAILED" : "OK", failures);
   return failures ? 1 : 0;

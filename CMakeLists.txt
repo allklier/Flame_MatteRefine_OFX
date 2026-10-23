@@ -14,7 +14,7 @@ endif()
 # Release version (0.1.0 = Fill Holes; 0.1.1 = Solid Core, View Matte default, Solid Above
 # 0.95, decimals, Save Matte, diagnostics; 0.1.2 = soft Solid Core (Feather px), macOS; 0.2.0 = Clean & Crush, Contour Smooth, Shrink/Grow, Edge Width, Snap to Image, Foreground Colour, QC views, matte on source alpha). Also the OFX plugin version (major.minor) and the
 # release package name.
-set(MR_VERSION "0.2.0")
+set(MR_VERSION "0.3.0")
 string(REPLACE "." ";" MR_VERSION_PARTS "${MR_VERSION}")
 list(GET MR_VERSION_PARTS 0 MR_VERSION_MAJOR)
 list(GET MR_VERSION_PARTS 1 MR_VERSION_MINOR)
@@ -27,6 +27,8 @@ endif()
 if(NOT MR_GIT)
   set(MR_GIT "nogit")
 endif()
+# Matte Refine ML tools (ofx/ml, decision 27): off by default, a plain build needs no ML runtime.
+option(MR_BUILD_ML "Build the Matte Refine ML tools" OFF)
 set(OFX_DIR ${CMAKE_SOURCE_DIR}/third_party/openfx)
 set(BUNDLE_NAME MatteRefine)
 set(BUNDLE_DIR ${CMAKE_BINARY_DIR}/${BUNDLE_NAME}.ofx.bundle)
@@ -61,7 +63,7 @@ endif()
 add_library(mr_ops STATIC ofx/src/ops/morphology.cpp ofx/src/ops/edge_field.cpp
   ofx/src/ops/fill_holes.cpp ofx/src/ops/solid_core.cpp ofx/src/ops/snap_to_image.cpp
   ofx/src/ops/foreground_colour.cpp ofx/src/ops/clean_background.cpp
-  ofx/src/ops/contour_smooth.cpp ofx/src/ops/shrink_grow.cpp ofx/src/ops/edge_width.cpp)
+  ofx/src/ops/contour_smooth.cpp ofx/src/ops/analyze_frame.cpp ofx/src/ops/shrink_grow.cpp ofx/src/ops/edge_width.cpp)
 target_include_directories(mr_ops PUBLIC ofx/src)
 target_compile_options(mr_ops PRIVATE -Wall -Wextra -fvisibility=hidden)
 target_link_libraries(mr_ops PUBLIC Threads::Threads)
@@ -72,8 +74,11 @@ add_library(${BUNDLE_NAME} MODULE
   ofx/src/user_config.cpp
   ofx/src/process.cpp
   ofx/src/env_info.cpp
+  ofx/src/ocio_encoding.cpp
   ${MR_PLATFORM_SOURCES})
 target_link_libraries(${BUNDLE_NAME} PRIVATE ofx_support mr_ops)
+# ofxsSupportPrivate.h: retrieveImageEffectPointer for the colour entry point (decision 23).
+target_include_directories(${BUNDLE_NAME} PRIVATE ${OFX_DIR}/Support/Library)
 target_compile_definitions(${BUNDLE_NAME} PRIVATE MR_VERSION="${MR_VERSION}" MR_GIT="${MR_GIT}"
   MR_VERSION_MAJOR=${MR_VERSION_MAJOR} MR_VERSION_MINOR=${MR_VERSION_MINOR})
 target_compile_options(${BUNDLE_NAME} PRIVATE -Wall -Wextra -Wno-deprecated-declarations -Wno-deprecated
@@ -116,14 +121,17 @@ target_link_libraries(mr_synth PRIVATE mr_synth_lib)
 
 enable_testing()
 add_executable(test_fill_holes ofx/tests/test_fill_holes.cpp)
-target_link_libraries(test_fill_holes PRIVATE mr_ops)
+target_link_libraries(test_fill_holes PRIVATE mr_ops mr_synth_lib)
 add_test(NAME fill_holes COMMAND test_fill_holes)
 add_executable(test_solid_core ofx/tests/test_solid_core.cpp)
-target_link_libraries(test_solid_core PRIVATE mr_ops)
+target_link_libraries(test_solid_core PRIVATE mr_ops mr_synth_lib)
 add_test(NAME solid_core COMMAND test_solid_core)
 add_executable(test_edge_field ofx/tests/test_edge_field.cpp)
-target_link_libraries(test_edge_field PRIVATE mr_ops)
+target_link_libraries(test_edge_field PRIVATE mr_ops mr_synth_lib)
 add_test(NAME edge_field COMMAND test_edge_field)
+add_executable(test_ocio_encoding ofx/tests/test_ocio_encoding.cpp ofx/src/ocio_encoding.cpp)
+target_include_directories(test_ocio_encoding PRIVATE ofx/src)
+add_test(NAME ocio_encoding COMMAND test_ocio_encoding)
 add_executable(test_synth ofx/tests/test_synth.cpp)
 target_link_libraries(test_synth PRIVATE mr_synth_lib)
 add_test(NAME synth COMMAND test_synth ${CMAKE_BINARY_DIR})
@@ -139,6 +147,9 @@ add_test(NAME clean_background COMMAND test_clean_background)
 add_executable(test_contour_smooth ofx/tests/test_contour_smooth.cpp)
 target_link_libraries(test_contour_smooth PRIVATE mr_ops mr_synth_lib)
 add_test(NAME contour_smooth COMMAND test_contour_smooth)
+add_executable(test_analyze_frame ofx/tests/test_analyze_frame.cpp)
+target_link_libraries(test_analyze_frame PRIVATE mr_ops mr_synth_lib)
+add_test(NAME analyze_frame COMMAND test_analyze_frame)
 add_executable(test_shrink_grow ofx/tests/test_shrink_grow.cpp)
 target_link_libraries(test_shrink_grow PRIVATE mr_ops mr_synth_lib)
 add_test(NAME shrink_grow COMMAND test_shrink_grow)
@@ -152,3 +163,7 @@ target_link_libraries(test_load_bundle PRIVATE dl)
 add_dependencies(test_load_bundle ${BUNDLE_NAME})
 add_test(NAME load_bundle
   COMMAND test_load_bundle ${BUNDLE_DIR}/Contents/${MR_ARCH_DIR}/${BUNDLE_NAME}.ofx)
+
+if(MR_BUILD_ML)
+  add_subdirectory(ofx/ml)
+endif()

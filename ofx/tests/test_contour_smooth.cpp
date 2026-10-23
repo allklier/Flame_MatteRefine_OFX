@@ -14,6 +14,8 @@
 #include "ops/edge_field.h"
 #include "ops/morphology.h"
 #include "synth.h"
+#include "old_edge_ops.h"
+#include "equivalence.h"
 
 using mr::ContourSmoothParams;
 using mr::ContourSmoothStats;
@@ -524,6 +526,62 @@ void testTiming() {
   CHECK(best < 100.0);
 }
 
+// Equivalence with the code before the speed work (old_edge_ops.h): bit for bit (output and
+// statistics), out of place and in place, on the synthetic scenes at 1080 and on random mattes,
+// sizes and settings.
+void testEquivalence() {
+  long long cases = 0, bad = 0, active = 0, skipped = 0;
+  auto check = [&](const std::vector<float>& in, int w, int h, const ContourSmoothParams& p) {
+    old_::cs::ContourSmoothParams q;
+    q.smoothPx = p.smoothPx;
+    q.maxShiftPx = p.maxShiftPx;
+    q.edgeAt = p.edgeAt;
+    q.cornerDeg = p.cornerDeg;
+    std::vector<float> a(in.size()), b(in.size()), c = in;
+    ContourSmoothStats sa, sc;
+    old_::cs::ContourSmoothStats sb;
+    mr::contourSmooth(in.data(), a.data(), w, h, p, &sa);
+    old_::cs::contourSmooth(in.data(), b.data(), w, h, q, &sb);
+    mr::contourSmooth(c.data(), c.data(), w, h, p, &sc);  // in place
+    const long long d = eq::bitsDiffer(a.data(), b.data(), a.size()) + eq::bitsDiffer(c.data(), b.data(), c.size());
+    bool same = d == 0;
+    for (const ContourSmoothStats* s : {&sa, &sc})
+      same = same && s->pixelsChanged == sb.pixelsChanged && s->contourSamples == sb.contourSamples &&
+             s->largestShiftPx == sb.largestShiftPx && s->skipped == sb.skipped;
+    if (!same) std::printf("  differs: %dx%d smooth %.2f shift %.2f at %.2f corner %.1f: %lld px\n", w, h, p.smoothPx,
+                           p.maxShiftPx, p.edgeAt, p.cornerDeg, d);
+    ++cases;
+    bad += !same;
+    active += sb.pixelsChanged > 0;
+    skipped += sb.skipped;
+  };
+  const char* scenes[] = {"all", "mixed_edge", "eroded", "chatter", "holes"};
+  for (const char* name : scenes) {
+    const synth::Scene s = synth::make(name, 1920, 1080);
+    check(s.matte, 1920, 1080, ContourSmoothParams());
+    ContourSmoothParams p;
+    p.smoothPx = 10.0;
+    p.maxShiftPx = 3.0;
+    p.edgeAt = 0.3f;
+    p.cornerDeg = 40.0;
+    check(s.matte, 1920, 1080, p);
+  }
+  std::mt19937 rng(20261025);
+  std::uniform_real_distribution<double> u(0.0, 1.0);
+  for (int t = 0; t < 40; ++t) {
+    const int w = t < 4 ? 1 + t * 3 : 20 + int(u(rng) * 380), h = t < 4 ? 40 - t * 9 : 10 + int(u(rng) * 290);
+    const std::vector<float> m = eq::randomMatte(rng, w, h);
+    ContourSmoothParams p;
+    p.smoothPx = u(rng) < 0.1 ? 0.0 : u(rng) * 60.0;
+    p.maxShiftPx = u(rng) * 4.0;
+    p.edgeAt = float(0.05 + 0.9 * u(rng));
+    p.cornerDeg = 5.0 + u(rng) * 175.0;
+    check(m, w, h, p);
+  }
+  std::printf("equivalence with the old contour smooth: %lld cases (%lld change pixels, %lld skipped as noisy), %lld differ\n", cases, active, skipped, bad);
+  CHECK(bad == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -535,6 +593,7 @@ int main() {
   testUntouchedElsewhere();
   testAgainstBruteForce();
   testChatterScene();
+  testEquivalence();
   testTiming();
   std::printf("%s (%d failure(s))\n", failures ? "FAILED" : "OK", failures);
   return failures ? 1 : 0;

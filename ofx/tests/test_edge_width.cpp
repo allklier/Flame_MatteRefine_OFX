@@ -10,6 +10,8 @@
 
 #include "ops/edge_width.h"
 #include "synth.h"
+#include "old_edge_ops.h"
+#include "equivalence.h"
 
 using mr::EdgeWidthParams;
 using mr::EdgeWidthStats;
@@ -295,6 +297,47 @@ void testTiming() {
   CHECK(ms < 60.0);  // indicative: other builds share this machine
 }
 
+// Equivalence with the code before the speed work (old_edge_ops.h): bit for bit, out of place
+// and in place, on the synthetic scenes at 1080 and on random mattes, sizes and settings.
+void testEquivalence() {
+  long long cases = 0, bad = 0, active = 0, skipped = 0;
+  auto check = [&](const std::vector<float>& in, int w, int h, double width, double amount) {
+    mr::EdgeWidthParams p;
+    p.widthPx = width;
+    p.amount = amount;
+    old_::ew::EdgeWidthParams q;
+    q.widthPx = width;
+    q.amount = amount;
+    std::vector<float> a(in.size()), b(in.size()), c = in;
+    mr::EdgeWidthStats sa, sc;
+    old_::ew::EdgeWidthStats sb;
+    mr::edgeWidth(in.data(), a.data(), w, h, p, &sa);
+    old_::ew::edgeWidth(in.data(), b.data(), w, h, q, &sb);
+    mr::edgeWidth(c.data(), c.data(), w, h, p, &sc);  // in place
+    const long long d = eq::bitsDiffer(a.data(), b.data(), a.size()) + eq::bitsDiffer(c.data(), b.data(), c.size());
+    const bool same = d == 0 && sa.pixelsChanged == sb.pixelsChanged && sc.pixelsChanged == sb.pixelsChanged;
+    if (!same) std::printf("  differs: %dx%d width %.3f amount %.3f: %lld px\n", w, h, width, amount, d);
+    ++cases;
+    bad += !same;
+    active += sb.pixelsChanged > 0;
+  };
+  const char* scenes[] = {"all", "mixed_edge", "eroded", "chatter", "holes"};
+  for (const char* name : scenes) {
+    const synth::Scene s = synth::make(name, 1920, 1080);
+    const double settings[][2] = {{2.0, 1.0}, {6.0, 0.5}, {0.5, 1.0}, {16.0, 1.0}, {2.0, 0.0}};
+    for (const auto& wa : settings) check(s.matte, 1920, 1080, wa[0], wa[1]);
+  }
+  std::mt19937 rng(20261024);
+  std::uniform_real_distribution<double> u(0.0, 1.0);
+  for (int t = 0; t < 40; ++t) {
+    const int w = t < 4 ? 1 + t * 3 : 20 + int(u(rng) * 380), h = t < 4 ? 40 - t * 9 : 10 + int(u(rng) * 290);
+    const std::vector<float> m = eq::randomMatte(rng, w, h);
+    check(m, w, h, 0.3 + u(rng) * 20.0, u(rng) * 1.4 - 0.2);
+  }
+  std::printf("equivalence with the old edge width: %lld cases (%lld change pixels), %lld differ\n", cases, active, bad);
+  CHECK(bad == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -308,6 +351,7 @@ int main() {
   testMixedEdge();
   testGreyFace();
   testInPlace();
+  testEquivalence();
   testTiming();
   std::printf("%s (%d failure(s))\n", failures ? "FAILED" : "OK", failures);
   return failures ? 1 : 0;
