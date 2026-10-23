@@ -12,8 +12,10 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <fstream>
+#include <iterator>
 #include <memory>
 #include <random>
 #include <string>
@@ -22,7 +24,11 @@
 
 #include "env_info.h"
 #include "log.h"
+#include "ocio_encoding.h"
+#include "ofxColour.h"
 #include "ofxsImageEffect.h"
+#include "ofxsSupportPrivate.h"
+#include "ops/analyze_frame.h"
 #include "ops/clean_background.h"
 #include "ops/contour_smooth.h"
 #include "ops/edge_field.h"
@@ -57,6 +63,7 @@ constexpr const char* kPluginLabel = "Matte Refine";
 constexpr const char* kMatteClip = "Matte";
 
 constexpr const char* kPView = "view";
+constexpr const char* kPView2 = "view2";  // the same View on tab 2, kept equal (decision 23)
 constexpr const char* kPFhEnable = "fhEnable";
 constexpr const char* kPFhThreshold = "fhThreshold";
 constexpr const char* kPFhMaxHole = "fhMaxHole";
@@ -93,10 +100,12 @@ constexpr const char* kPSnFromPicture = "snFromPicture";
 constexpr const char* kPFgEnable = "fgEnable";
 constexpr const char* kPFgSmoothness = "fgSmoothness";
 constexpr const char* kPFgExtend = "fgExtend";
+constexpr const char* kPFgIgnore = "fgIgnore";
 constexpr const char* kPFgMix = "fgMix";
 constexpr const char* kPDebugLog = "debugLog";
 constexpr const char* kPCollectLogs = "collectLogs";
 constexpr const char* kPSaveMatte = "saveMatte";
+constexpr const char* kPAnalyze = "analyzeFrame";
 constexpr const char* kPNodeId = "nodeId";
 
 // Stored as indexes in setups: append only. 0 was "Result", then "Source" (the front input);
@@ -158,7 +167,7 @@ std::vector<float> extractMatte(const OFX::Image& src, bool rgbIsMatte = false) 
 }
 
 // The picture (the front input), top-down, w*h*3 (decision 4): for Snap to Image and
-// Foreground Colour.
+// Edge Colour Unmix.
 std::vector<float> extractRgb(const OFX::Image& src) {
   const OfxRectI sb = src.getBounds();
   const int w = sb.x2 - sb.x1, h = sb.y2 - sb.y1, sc = componentCount(src.getPixelComponents());
@@ -182,6 +191,7 @@ class MatteRefineEffect : public OFX::ImageEffect {
     dst_ = fetchClip(kOfxImageEffectOutputClipName);
     matteClip_ = fetchClip(kMatteClip);
     view_ = fetchChoiceParam(kPView);
+    view2_ = fetchChoiceParam(kPView2);
     fhEnable_ = fetchBooleanParam(kPFhEnable);
     fhThreshold_ = fetchDoubleParam(kPFhThreshold);
     fhMaxHole_ = fetchDoubleParam(kPFhMaxHole);
@@ -218,6 +228,7 @@ class MatteRefineEffect : public OFX::ImageEffect {
     fgEnable_ = fetchBooleanParam(kPFgEnable);
     fgSmoothness_ = fetchDoubleParam(kPFgSmoothness);
     fgExtend_ = fetchDoubleParam(kPFgExtend);
+    fgIgnore_ = fetchDoubleParam(kPFgIgnore);
     fgMix_ = fetchDoubleParam(kPFgMix);
     debugLog_ = fetchBooleanParam(kPDebugLog);
     OFX::StringParam* nodeIdParam = fetchStringParam(kPNodeId);
@@ -230,6 +241,10 @@ class MatteRefineEffect : public OFX::ImageEffect {
       LogScope scope(nodeId_);
       LOGI("createInstance %p context=%d", static_cast<void*>(this), int(getContext()));
       debugLog_->setValue(logLevel() == LogLevel::Debug);  // per user, not stored in setups
+      int v = 0, v2 = 0;
+      view_->getValue(v);
+      view2_->getValue(v2);
+      if (v2 != v) view2_->setValue(v);
     } catch (const std::exception& e) {
       LOGE("createInstance: setting param values FAILED: %s [%s]", e.what(), typeid(e).name());
     }
@@ -270,6 +285,12 @@ class MatteRefineEffect : public OFX::ImageEffect {
       collectLogs();
     } else if (name == kPSaveMatte) {
       saveMatte(args.time);
+    } else if (name == kPAnalyze) {
+      analyzeFrameButton(args.time, args.renderScale.x);
+    } else if (name == kPView || name == kPView2) {  // keep both tabs' View equal
+      int v = 0;
+      (name == kPView ? view_ : view2_)->getValue(v);
+      (name == kPView ? view2_ : view_)->setValue(v);
     } else if (name == kPDebugLog) {
       bool on = false;
       debugLog_->getValue(on);
@@ -431,9 +452,11 @@ class MatteRefineEffect : public OFX::ImageEffect {
                     st.skipped ? ", SKIPPED: noisy matte" : "");
       opLog += b;
     }
+    double growPx = 0.0;  // the matte was grown this much (user units): Edge Colour Unmix ignores it
     if (on(sgEnable_)) {
       ShrinkGrowParams p;
       p.amountPx = val(sgAmount_) * scale;
+      growPx = std::max(0.0, val(sgAmount_));
       ShrinkGrowStats st;
       const auto c0 = std::chrono::steady_clock::now();
       shrinkGrow(result.data(), result.data(), w, h, p, &st);
@@ -457,7 +480,7 @@ class MatteRefineEffect : public OFX::ImageEffect {
     bool snOn = on(snEnable_), fgOn = on(fgEnable_);
     if ((snOn || fgOn) && !src) {
       if (warning.empty())
-        warning = "Snap to Image and Foreground Colour need the picture on the front input.";
+        warning = "Snap to Image and Edge Colour Unmix need the picture on the front input.";
       snOn = fgOn = false;
     }
     const std::vector<float> rgb = snOn || fgOn ? extractRgb(*src) : std::vector<float>();
@@ -475,20 +498,30 @@ class MatteRefineEffect : public OFX::ImageEffect {
                     p.radiusPx, p.bandPx, p.detail, p.fromPicture, since(c0), st.pixelsChanged, st.maxChange);
       opLog += b;
     }
-    // Foreground Colour changes the picture, not the matte: the Picture view shows it.
+    // Edge Colour Unmix (foreground_colour) changes the picture, not the matte: View Picture.
     std::vector<float> fg;
+    bool error = false;
     if (fgOn) {
+      const std::string problem = fgColourspaceProblem();
+      if (!problem.empty()) {
+        warning = problem;
+        error = true;
+      }
       FgParams p;
       p.smoothness = val(fgSmoothness_);
       p.extendPx = val(fgExtend_) * scale;
+      // Decision 26: a grown matte holds old-background pixels as "solid": ignore that much more.
+      p.ignoreOuterPx = (val(fgIgnore_) + growPx) * scale;
       p.mix = float(val(fgMix_));
       FgStats st;
       fg.resize(rgb.size());
       const auto c0 = std::chrono::steady_clock::now();
       foregroundColour(rgb.data(), result.data(), fg.data(), w, h, p, &st);
       char b[160];
-      std::snprintf(b, sizeof b, " fgColour [smooth %.3g, extend %.3g, mix %.3g] %.1f ms (%lld edge px)",
-                    p.smoothness, p.extendPx, p.mix, since(c0), st.edgePixels);
+      std::snprintf(b, sizeof b,
+                    " fgColour [smooth %.3g, extend %.3g, ignore %.3g, mix %.3g] %.1f ms (%lld edge px, %lld ignored)",
+                    p.smoothness, p.extendPx, p.ignoreOuterPx, p.mix, since(c0), st.edgePixels,
+                    st.ignoredPixels);
       opLog += b;
     }
     // Grey Inside: semi-transparent pixels more than 4 px inside the 0.5 contour.
@@ -551,7 +584,8 @@ class MatteRefineEffect : public OFX::ImageEffect {
       if (warning.empty())
         clearPersistentMessage();
       else
-        setPersistentMessage(OFX::Message::eMessageWarning, "", warning);
+        setPersistentMessage(error ? OFX::Message::eMessageError : OFX::Message::eMessageWarning, "",
+                             warning);
     } catch (const std::exception& e) {
       LOGW("render: persistent message FAILED: %s", e.what());
     }
@@ -566,6 +600,50 @@ class MatteRefineEffect : public OFX::ImageEffect {
  private:
   // Writes this frame's input matte (what the ops see) for offline analysis on this machine:
   // ~/.cache/matte-refine/dumps/<node>_t<time>.f32 (w*h floats, top row first) + .txt.
+  // Analyze Frame (roadmap, 2026-10-23): analyse this frame's input matte and set Clean & Crush,
+  // Fill Holes and Solid Core for it; the popup says what was chosen and why. Pixel values come
+  // back at the frame's own resolution and are stored in full-resolution units (decision 6).
+  void analyzeFrameButton(double time, double scale) {
+    const bool own = matteClip_->isConnected();
+    std::unique_ptr<OFX::Image> img((own ? matteClip_ : src_)->fetchImage(time));
+    if (!img || img->getPixelDepth() != OFX::eBitDepthFloat) {
+      sendMessage(OFX::Message::eMessageError, "", "Analyze Frame: no 32-bit float matte.");
+      return;
+    }
+    const OfxRectI b = img->getBounds();
+    const int w = b.x2 - b.x1, h = b.y2 - b.y1;
+    const std::vector<float> matte = extractMatte(*img, own);
+    AnalysisResult r;
+    analyzeFrame(matte.data(), w, h, &r);
+    std::string text = "Analyze Frame:";
+    for (const std::string& n : r.notes) text += "\n- " + n;
+    LOGI("analyzeFrame %dx%d: %.0f ms, clean %d fill %d (thr %.3g max %.3g bridge %.3g) core %d%s%s%s%s", w, h,
+         r.measured.ms, r.cleanEnable, r.fillEnable, r.fill.threshold, r.fill.maxHolePercent,
+         r.fill.bridgePx, r.coreEnable, r.constantMatte ? " [constant]" : "", r.noSubject ? " [no subject]" : "",
+         r.noisy ? " [noisy]" : "", r.tooSmall ? " [too small]" : "");
+    if (!r.constantMatte && !r.noSubject && !r.noisy && !r.tooSmall) {  // else nothing is changed
+      const double sc = scale > 0.0 ? scale : 1.0;
+      cbEnable_->setValue(r.cleanEnable);
+      cbMaxIsland_->setValue(r.clean.maxIslandPercent);
+      cbBelow_->setValue(r.clean.backgroundBelow);
+      cbCrush_->setValue(r.clean.crushPx / sc);
+      fhEnable_->setValue(r.fillEnable);
+      fhThreshold_->setValue(r.fill.threshold);
+      fhMaxHole_->setValue(r.fill.maxHolePercent);
+      fhBridge_->setValue(r.fill.bridgePx / sc);
+      fhRim_->setValue(r.fill.rimPx / sc);
+      fhClosedLeft_->setValue(r.fill.closedLeft);
+      fhClosedRight_->setValue(r.fill.closedRight);
+      fhClosedTop_->setValue(r.fill.closedTop);
+      fhClosedBottom_->setValue(r.fill.closedBottom);
+      scEnable_->setValue(r.coreEnable);
+      scDepth_->setValue(r.core.depthPx / sc);
+      scEdgeAt_->setValue(r.core.edgeAt);
+      scFeather_->setValue(r.core.featherPx / sc);
+    }
+    sendMessage(OFX::Message::eMessageMessage, "", text);
+  }
+
   void saveMatte(double time) {
     const bool own = matteClip_->isConnected();
     std::unique_ptr<OFX::Image> src((own ? matteClip_ : src_)->fetchImage(time));
@@ -647,10 +725,72 @@ class MatteRefineEffect : public OFX::ImageEffect {
   OFX::DoubleParam* sgAmount_;
   OFX::DoubleParam *ewWidth_, *ewMix_;
   OFX::DoubleParam *snRadius_, *snBand_, *snDetail_, *snFromPicture_;
-  OFX::DoubleParam *fgSmoothness_, *fgExtend_, *fgMix_;
+  OFX::DoubleParam *fgSmoothness_, *fgExtend_, *fgIgnore_, *fgMix_;
   OFX::BooleanParam* debugLog_;
   std::string nodeId_;
   bool inChangedParam_ = false;
+  OFX::ChoiceParam* view2_;
+
+ public:
+  // Decision 23 (OpenFX 1.5 colour management): the picture passing through keeps the input's
+  // colourspace; a matte on RGB is tagged as a matte (the config's "Matte", else "Raw"). Empty
+  // = no colour management negotiated: the host's default.
+  std::string outputColourspace() {
+    int view = kViewPicture;
+    view_->getValue(view);
+    if (view == kViewPicture && src_->isConnected()) return "OfxColourspace_Source";
+    const std::string style =
+        getPropertySet().propGetString(kOfxImageEffectPropColourManagementStyle, false);
+    if (style == kOfxImageEffectColourManagementOCIO) return configHasMatte() ? "Matte" : "Raw";
+    if (style == kOfxImageEffectColourManagementFull || style == kOfxImageEffectColourManagementCore)
+      return kOfxColourspaceRaw;
+    if (style == kOfxImageEffectColourManagementBasic) return kOfxColourspaceOfxRaw;
+    return "";
+  }
+
+ private:
+  // The active OCIO config's text, read once (no OCIO library; decisions 23, 24).
+  const std::string& configText() {
+    if (!configRead_) {
+      configRead_ = true;
+      const std::string path = getPropertySet().propGetString(kOfxImageEffectPropOCIOConfig, false);
+      std::ifstream in(path);
+      configText_.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+      LOGI("colour: OCIO config '%s' (%zu bytes)", path.c_str(), configText_.size());
+    }
+    return configText_;
+  }
+
+  // Flame's configs define a "Matte" colourspace (alias adsk:matte_data, encoding data; 2026.0
+  // aces2.0 config); others may not.
+  bool configHasMatte() {
+    if (!matteChecked_) {
+      matteChecked_ = true;
+      hasMatte_ = colourspaceEncoding(configText(), "Matte") == "data";
+      LOGI("colour: Matte colourspace %s", hasMatte_ ? "found" : "not found (Raw)");
+    }
+    return hasMatte_;
+  }
+
+  // Decision 24: Edge Colour Unmix solves the compositing equation, which holds only in linear
+  // light. "" = the picture is scene-linear, else the footer error.
+  std::string fgColourspaceProblem() {
+    const std::string cs = src_->getPropertySet().propGetString(kOfxImageClipPropColourspace, false);
+    if (cs != lastPictureCs_) {
+      lastPictureCs_ = cs;
+      LOGI("colour: picture colourspace '%s'", cs.c_str());
+    }
+    if (cs.empty())
+      return "Edge Colour Unmix: the picture's colour space is unknown (no colour management); "
+             "it must be scene-linear.";
+    const std::string enc = colourspaceEncoding(configText(), cs);
+    if (enc == "scene-linear") return "";
+    return "Edge Colour Unmix needs a scene-linear picture; the front input is " + cs +
+           (enc.empty() ? " (not in the colour config)." : " (" + enc + "). Convert it to linear first.");
+  }
+  std::string configText_, lastPictureCs_;
+  bool configRead_ = false;
+  bool matteChecked_ = false, hasMatte_ = false;
 };
 
 template <class D>
@@ -662,6 +802,28 @@ D* labelled(D* p, const char* label, const char* hint) {
 
 class MatteRefineFactory : public OFX::PluginFactoryHelper<MatteRefineFactory> {
  public:
+  // The 1.4 Support library doesn't know OpenFX 1.5's GetOutputColourspace action (it answers
+  // "not trapped"), so this entry point answers it and passes every other action on.
+  static OfxStatus entry(const char* action, const void* handle, OfxPropertySetHandle in,
+                         OfxPropertySetHandle out) {
+    if (std::strcmp(action, kOfxImageEffectActionGetOutputColourspace) == 0) {
+      try {
+        auto* fx = dynamic_cast<MatteRefineEffect*>(
+            OFX::Private::retrieveImageEffectPointer((OfxImageEffectHandle)handle));
+        const std::string cs = fx ? fx->outputColourspace() : "";
+        if (cs.empty()) return kOfxStatReplyDefault;
+        OFX::PropertySet(out).propSetString(kOfxImageClipPropColourspace, cs);
+        LOGD("colour: output colourspace %s", cs.c_str());
+        return kOfxStatOK;
+      } catch (const std::exception& e) {
+        LOGE("colour: GetOutputColourspace FAILED: %s", e.what());
+        return kOfxStatFailed;
+      }
+    }
+    return FactoryMainEntryHelper<MatteRefineFactory>::mainEntry(action, handle, in, out);
+  }
+  OfxPluginEntryPoint* getMainEntry() override { return entry; }
+
   MatteRefineFactory()
       : PluginFactoryHelper<MatteRefineFactory>(kPluginId, MR_VERSION_MAJOR, MR_VERSION_MINOR) {}
 
@@ -682,6 +844,11 @@ class MatteRefineFactory : public OFX::PluginFactoryHelper<MatteRefineFactory> {
     desc.setRenderTwiceAlways(false);
     desc.setSupportsMultipleClipPARs(false);
     desc.setRenderThreadSafety(OFX::eRenderInstanceSafe);
+    // Decision 23: OpenFX 1.5 colour management (Flame 2026.1+); older hosts ignore these.
+    desc.getPropertySet().propSetString(kOfxImageEffectPropColourManagementStyle,
+                                        kOfxImageEffectColourManagementOCIO, false);
+    desc.getPropertySet().propSetString(kOfxImageEffectPropColourManagementAvailableConfigs,
+                                        "ofx-native-v1.5_aces-v1.3_ocio-v2.3", false);
   }
 
   void describeInContext(OFX::ImageEffectDescriptor& desc, OFX::ContextEnum ctx) override {
@@ -752,11 +919,12 @@ class MatteRefineFactory : public OFX::PluginFactoryHelper<MatteRefineFactory> {
                           "What the image output shows (the matte output is always the refined "
                           "matte). Matte: the refined matte. Show Changes: the input matte in "
                           "grey, raised pixels magenta, lowered green. Picture: the front input "
-                          "(the clean foreground colour with Foreground Colour on). Trimap: "
+                          "(its edges unmixed with Edge Colour Unmix on). Trimap: "
                           "solid / edge / clear. Grey Inside: semi-transparent pixels deep "
                           "inside the matte, in red.");
     for (const char* c : kViewNames) view->appendOption(c);
     view->setDefault(kViewPicture);  // decision 22: the picture passes through, the matte refined
+    view->setAnimates(false);        // decision 23: two Views kept equal, no keyframes
     view->setParent(*gMatte);
     auto* version = labelled(desc.defineStringParam("version"), "Version", "");
     version->setStringType(OFX::eStringTypeLabel);
@@ -782,6 +950,11 @@ class MatteRefineFactory : public OFX::PluginFactoryHelper<MatteRefineFactory> {
            30.0, 1, 0.5, gCb);
     number(kPCbFeather, "Crush Feather px", "The crush fades in over this many pixels.", 2.0,
            20.0, 10.0, 1, 0.5, gCb);
+
+    labelled(desc.definePushButtonParam(kPAnalyze), "Analyze Frame",
+             "Look at this frame's matte and set Clean & Crush, Fill Holes and Solid Core for it; "
+             "a message says what was chosen and why. Other operations are not touched.")
+        ->setParent(*gMatte);
 
     // --- Fill Holes (5 rows; decisions 8-10) ---
     auto* gFh = group("grpFillHoles", "Fill Holes");
@@ -842,9 +1015,31 @@ class MatteRefineFactory : public OFX::PluginFactoryHelper<MatteRefineFactory> {
              "Save this frame's input matte to ~/.cache/matte-refine/dumps for analysis. It "
              "stays on this machine.")
         ->setParent(*gSupport);
+    // Hidden, but Flame still gives it a slot: defined last outside a group it took a column
+    // of its own and, with tab 2 full, a third tab (Flame test, 2026-10-23). In Support (4 rows).
+    auto* nid = desc.defineStringParam(kPNodeId);
+    nid->setDefault("");
+    nid->setIsSecret(true);
+    nid->setEvaluateOnChange(false);
+    nid->setParent(*gSupport);
 
     // --- Tab 2 "Edge" (decision 19), in chain order ---
     page = desc.definePageParam("Edge");
+    // The Matte column again (decision 23): View kept equal to tab 1's by changedParam.
+    auto* gMatte2 = group("grpMatte2", "Matte");
+    auto* view2 = labelled(desc.defineChoiceParam(kPView2), "View",
+                           "The same View as on the first tab.");
+    for (const char* c : kViewNames) view2->appendOption(c);
+    view2->setDefault(kViewPicture);
+    view2->setAnimates(false);
+    view2->setEvaluateOnChange(false);  // render reads tab 1's View, which changes with it
+    view2->setParent(*gMatte2);
+    auto* version2 = labelled(desc.defineStringParam("version2"), "Version", "");
+    version2->setStringType(OFX::eStringTypeLabel);
+    version2->setDefault(MR_VERSION " (" MR_GIT ")");
+    version2->setIsPersistant(false);
+    version2->setEvaluateOnChange(false);
+    version2->setParent(*gMatte2);
     auto* gCs = group("grpContourSmooth", "Contour Smooth");
     boolean(kPCsEnable, "Enable",
             "Take wiggle and chatter off the edge line; the edge's softness and corners are kept.",
@@ -890,22 +1085,22 @@ class MatteRefineFactory : public OFX::PluginFactoryHelper<MatteRefineFactory> {
     number(kPSnFromPicture, "Edge From Picture",
            "0 = keep the matte's own softness, 1 = take the softness from the picture.", 0.35, 1.0,
            1.0, 2, 0.05, gSn);
-    auto* gFg = group("grpForegroundColour", "Foreground Colour");
+    auto* gFg = group("grpForegroundColour", "Edge Colour Unmix");  // decision 25
     boolean(kPFgEnable, "Enable",
-            "Clean the edge's colour of the old background; View Picture shows it.", false, gFg);
+            "Removes the old background's colour from soft edges (RGB only, the matte is unchanged); "
+            "View Picture shows it.", false, gFg);
     number(kPFgSmoothness, "Edge Smoothness", "Higher = flatter foreground colour in the edge.",
            0.005, 0.5, 0.2, 4, 0.001, gFg)
         ->setRange(0.0001, 0.5);
     number(kPFgExtend, "Extend px", "Also solve this far beyond the soft edge.", 3.0, 20.0, 20.0,
            1, 0.5, gFg);
+    number(kPFgIgnore, "Ignore Outer px",
+           "Estimate the colour only from pixels this deep inside the edge, so a matte that is "
+           "too big (green edge) still unmixes. Shrink / Grow's amount is added when it is on.",
+           3.0, 20.0, 10.0, 1, 0.5, gFg);
     number(kPFgMix, "Mix", "0 = the picture, 1 = the clean foreground colour.", 1.0, 1.0, 1.0, 2,
            0.05, gFg);
 
-    // --- Hidden ---
-    auto* nid = desc.defineStringParam(kPNodeId);
-    nid->setDefault("");
-    nid->setIsSecret(true);
-    nid->setEvaluateOnChange(false);
   }
 
   OFX::ImageEffect* createInstance(OfxImageEffectHandle handle, OFX::ContextEnum) override {

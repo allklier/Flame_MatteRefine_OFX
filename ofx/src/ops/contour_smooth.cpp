@@ -1,7 +1,10 @@
 #include "ops/contour_smooth.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <cstdlib>
+#include <memory>
 #include <thread>
 #include <vector>
 
@@ -142,8 +145,9 @@ struct Band {
   static constexpr int kTile = 16;
   int w, h, tw, th;
   std::vector<int> slot;  // per tile: its storage index, -1 = outside the band
-  std::vector<float> d2;  // squared distance to the contour (pixels of the other side)
-  std::vector<int> nearest;  // the sample it was measured from, -1 = none
+  size_t size = 0;           // tiles in the band x kTile^2
+  std::unique_ptr<float[]> d2;  // squared distance to the contour (pixels of the other side)
+  std::unique_ptr<int[]> nearest;  // the sample it was measured from, -1 = none
   Band(int w, int h) : w(w), h(h), tw((w + kTile - 1) / kTile), th((h + kTile - 1) / kTile), slot(size_t(tw) * th, -1) {}
   int index(int x, int y) const {
     const int s = slot[size_t(y / kTile) * tw + x / kTile];
@@ -157,42 +161,49 @@ void contourSmooth(const float* in, float* out, int w, int h, const ContourSmoot
                    ContourSmoothStats* stats) {
   ContourSmoothStats st;
   const size_t n = size_t(std::max(w, 0)) * std::max(h, 0);
-  if (out != in) std::copy(in, in + n, out);
   if (n == 0 || p.smoothPx <= 0.0 || p.maxShiftPx <= 0.0) {
+    if (out != in) std::copy(in, in + n, out);
     if (stats) *stats = st;
     return;
   }
+  Workers wk;
+  if (out != in) parallelFor(&wk, h, 16, [&](int y0, int y1) {
+    std::copy(in + size_t(y0) * w, in + size_t(y1) * w, out + size_t(y0) * w);
+  });
 
   // Contour samples on both sides of the Edge At contour (pixels beyond the frame don't count:
   // the frame border is no edge). Hair below Edge At has no contour and gives none.
-  Mask below(n);
-  for (size_t i = 0; i < n; ++i) below[i] = in[i] < p.edgeAt;
-  std::vector<Sample> samples;  // in scan order
-  for (int y = 0; y < h; ++y)
-    for (int x = 0; x < w; ++x) {
-      const size_t i = size_t(y) * w + x;
+  std::unique_ptr<uint8_t[]> belowBuf(new uint8_t[n]);
+  const uint8_t* below = belowBuf.get();
+  parallelFor(&wk, h, 16, [&](int y0, int y1) {
+    for (size_t i = size_t(y0) * w; i < size_t(y1) * w; ++i) belowBuf[i] = in[i] < p.edgeAt;
+  });
+  const std::vector<int> contour = contourPixels(below, w, h, &wk);
+  std::vector<Sample> samples(contour.size());  // in scan order
+  parallelFor(&wk, int(contour.size()), 256, [&](int c0, int c1) {
+    for (int c = c0; c < c1; ++c) {
+      const int i = contour[size_t(c)], x = i % w, y = i / w;
       const bool b = below[i];
-      if (!((x > 0 && below[i - 1] != b) || (x + 1 < w && below[i + 1] != b) ||
-            (y > 0 && below[i - w] != b) || (y + 1 < h && below[i + w] != b)))
-        continue;
-      const ContourFoot f = contourFoot(in, below, w, h, p.edgeAt, int(i));
+      const ContourFoot f = contourFoot(in, below, w, h, p.edgeAt, i);
       const float sg = b ? -1.0f : 1.0f;  // outward: a below pixel's normal points inward
-      samples.push_back({x + f.fx, y + f.fy, sg * f.nx, sg * f.ny, int(i), b});
+      samples[size_t(c)] = {x + f.fx, y + f.fy, sg * f.nx, sg * f.ny, i, b};
     }
+  });
   st.contourSamples = (long long)samples.size();
 
   // The signed distance to the contour within the band, as signedEdgeDistance (decision 20)
   // computes it, plus which sample each pixel is nearest to: each sample stamps a disc onto the
   // pixels of the other side. Done here because signedEdgeDistance works on full frames
-  // (~35 ms at UHD) and gives no nearest sample. Rows in stripes of 2 radii, even stripes then
-  // odd ones, so threads never write the same pixel.
+  // (~35 ms at UHD) and gives no nearest sample. Each row of tiles is stamped by one thread from
+  // the samples within reach, in scan order: a strict minimum then keeps the lowest of tied
+  // samples, the rule that makes the result independent of the stamping order.
   const double band = p.maxShiftPx + kProfilePx;
   const double r = band + 1.5;  // a foot point lies within 1.5 px of its pixel (morphology.h)
   const int ri = int(std::ceil(r));
-  std::vector<std::pair<int, int>> disc;
+  std::vector<int> half(size_t(2 * ri + 1), -1);  // the disc's half-width per row
   for (int dy = -ri; dy <= ri; ++dy)
     for (int dx = -ri; dx <= ri; ++dx)
-      if (dx * dx + dy * dy <= r * r) disc.emplace_back(dx, dy);
+      if (dx * dx + dy * dy <= r * r) half[size_t(dy + ri)] = std::max(half[size_t(dy + ri)], std::abs(dx));
   // A noisy matte (a contour at 1 in 16 pixels or more) has no line to smooth, and would cost
   // seconds.
   if (samples.size() > n / 16) {
@@ -208,36 +219,55 @@ void contourSmooth(const float* in, float* out, int w, int h, const ContourSmoot
       for (int tx = std::max(x - ri, 0) / T; tx <= std::min(x + ri, w - 1) / T; ++tx)
         if (bd.slot[size_t(ty) * bd.tw + tx] < 0) bd.slot[size_t(ty) * bd.tw + tx] = tiles++;
   }
-  bd.d2.assign(size_t(tiles) * Band::kTile * Band::kTile, 1e30f);
-  bd.nearest.assign(bd.d2.size(), -1);
-  const int stripe = 2 * ri + 1, stripes = (h + stripe - 1) / stripe;
-  for (int phase = 0; phase < 2; ++phase)
-    parallelFor((stripes + 1 - phase) / 2, 1, [&](int s0, int s1) {
-      for (int sIdx = s0; sIdx < s1; ++sIdx) {
-        const int y0 = (2 * sIdx + phase) * stripe, y1 = std::min(y0 + stripe, h);
-        auto first = std::lower_bound(samples.begin(), samples.end(), size_t(y0) * w,
-                                      [](const Sample& a, size_t v) { return size_t(a.pix) < v; });
-        for (auto it = first; it != samples.end() && it->pix < y1 * w; ++it) {
-          const int x = it->pix % w, y = it->pix / w;
-          const float fx = it->x - x, fy = it->y - y;
-          for (const auto& o : disc) {
-            const int px = x + o.first, py = y + o.second;
-            if (px < 0 || py < 0 || px >= w || py >= h || below[size_t(py) * w + px] == it->below) continue;
-            const float ox = float(o.first), oy = float(o.second), vx = ox - fx, vy = oy - fy;
-            const float perp = vx * it->nx + vy * it->ny;
-            const float along = std::max(0.0f, std::fabs(vy * it->nx - vx * it->ny) - 0.5f);
+  bd.size = size_t(tiles) * Band::kTile * Band::kTile;
+  bd.d2.reset(new float[bd.size]);
+  bd.nearest.reset(new int[bd.size]);
+  dynamicFor<int>(&wk, bd.th, [&](int ty, int&) {
+    constexpr int T = Band::kTile;
+    const int y0 = ty * T, y1 = std::min(y0 + T, h);
+    for (int tx = 0; tx < bd.tw; ++tx) {
+      const int s = bd.slot[size_t(ty) * bd.tw + tx];
+      if (s < 0) continue;
+      std::fill(&bd.d2[size_t(s) * T * T], &bd.d2[size_t(s + 1) * T * T], 1e30f);
+      std::fill(&bd.nearest[size_t(s) * T * T], &bd.nearest[size_t(s + 1) * T * T], -1);
+    }
+    auto first = std::lower_bound(samples.begin(), samples.end(), size_t(std::max(0, y0 - ri)) * w,
+                                  [](const Sample& a, size_t v) { return size_t(a.pix) < v; });
+    for (auto it = first; it != samples.end() && it->pix < std::min(h, y1 + ri) * w; ++it) {
+      const int x = it->pix % w, y = it->pix / w, j = int(it - samples.begin());
+      const float fx = it->x - x, fy = it->y - y, snx = it->nx, sny = it->ny;
+      const uint8_t side = it->below;
+      for (int py = std::max(y0, y - ri); py < std::min(y1, y + ri + 1); ++py) {
+        const int hw = half[size_t(py - y + ri)];
+        if (hw < 0) continue;
+        const float oy = float(py - y);
+        const uint8_t* bl = below + size_t(py) * w;
+        const int xa = std::max(0, x - hw), xb = std::min(w - 1, x + hw);
+        for (int tx0 = xa; tx0 <= xb;) {  // one tile's part of the span at a time
+          const int tEnd = std::min(xb, (tx0 / T + 1) * T - 1);
+          const size_t base = size_t(bd.slot[size_t(ty) * bd.tw + tx0 / T]) * T * T + size_t(py - y0) * T;
+          float* d2 = &bd.d2[base];
+          int* nr = &bd.nearest[base];
+          for (int px = tx0; px <= tEnd; ++px) {
+            if (bl[px] == side) continue;
+            const float ox = float(px - x), vx = ox - fx, vy = oy - fy;
+            const float perp = vx * snx + vy * sny;
+            const float along = std::max(0.0f, std::fabs(vy * snx - vx * sny) - 0.5f);
             const float dd = std::min(ox * ox + oy * oy, perp * perp + along * along);
-            const int k = bd.index(px, py), j = int(it - samples.begin());
-            // Ties go to the lower sample, so the result doesn't depend on the stamping order.
-            if (dd < bd.d2[size_t(k)] || (dd == bd.d2[size_t(k)] && j < bd.nearest[size_t(k)]))
-              bd.d2[size_t(k)] = dd, bd.nearest[size_t(k)] = j;
+            const int k = px % T;
+            if (dd < d2[k]) d2[k] = dd, nr[k] = j;
           }
+          tx0 = tEnd + 1;
         }
       }
-    });
+    }
+  });
   // Signed distance, > 0 inside, +-(band + 1) beyond the band (as signedEdgeDistance).
   const float cap = float(band + 1.0);
-  for (size_t k = 0; k < bd.d2.size(); ++k) bd.d2[k] = bd.nearest[k] >= 0 ? std::min(std::sqrt(bd.d2[k]), cap) : cap;
+  parallelFor(&wk, int(bd.size / 256), 16, [&](int k0, int k1) {
+    for (size_t k = size_t(k0) * 256; k < size_t(k1) * 256; ++k)
+      bd.d2[k] = bd.nearest[k] >= 0 ? std::min(std::sqrt(bd.d2[k]), cap) : cap;
+  });
   auto sd = [&](int x, int y) {
     const int k = bd.index(x, y);
     const float d = k < 0 ? cap : bd.d2[size_t(k)];
@@ -254,7 +284,7 @@ void contourSmooth(const float* in, float* out, int w, int h, const ContourSmoot
   const double cosCorner = std::cos(corner), cosFull = std::cos(corner - 10.0 * M_PI / 180.0);
   std::vector<float> fitted(samples.size(), 0.0f);
   std::vector<uint8_t> kept(samples.size(), 1);  // thin or not one edge: never moves
-  parallelFor(int(samples.size()), 256, [&](int j0, int j1) {
+  parallelFor(&wk, int(samples.size()), 256, [&](int j0, int j1) {
     for (int j = j0; j < j1; ++j) {
       const Sample& o = samples[size_t(j)];
       // Thin features (hair strands, narrow gaps) are left alone: their contour is too poorly
@@ -291,7 +321,7 @@ void contourSmooth(const float* in, float* out, int w, int h, const ContourSmoot
   // corner, kept samples left out) is replaced by it. Only spikes: a plain median flattened a
   // steep wiggle's extremes.
   std::vector<float> move(samples.size());
-  parallelFor(int(samples.size()), 1024, [&](int j0, int j1) {
+  parallelFor(&wk, int(samples.size()), 1024, [&](int j0, int j1) {
     std::vector<float> near;
     for (int j = j0; j < j1; ++j) {
       const Sample& o = samples[size_t(j)];
@@ -317,12 +347,13 @@ void contourSmooth(const float* in, float* out, int w, int h, const ContourSmoot
   // a 0.13 px row-to-row jitter (aliasing) into a smoothed slant; bilinear is smooth, exact on
   // the ramp and coverage-correct on a hard edge, and moved hair strands near the edge far less
   // (synth hair crop, truth as input: max change 0.38 -> 0.07).
-  std::vector<float> res(bd.d2.size());
+  std::unique_ptr<float[]> res(new float[bd.size]);
   std::vector<int> tileList(size_t(bd.tw) * bd.th);
   for (size_t t = 0; t < tileList.size(); ++t) tileList[t] = bd.slot[t] < 0 ? -1 : int(t);
   tileList.erase(std::remove(tileList.begin(), tileList.end(), -1), tileList.end());
   std::vector<double> largest(tileList.size(), 0.0);
-  parallelFor(int(tileList.size()), 16, [&](int t0, int t1) {
+  std::vector<long long> changedIn(tileList.size(), 0);
+  parallelFor(&wk, int(tileList.size()), 16, [&](int t0, int t1) {
     for (int t = t0; t < t1; ++t) {
       const int T = Band::kTile, bx = tileList[size_t(t)] % bd.tw * T, by = tileList[size_t(t)] / bd.tw * T;
       for (int y = by; y < std::min(by + T, h); ++y)
@@ -344,15 +375,20 @@ void contourSmooth(const float* in, float* out, int w, int h, const ContourSmoot
         }
     }
   });
+  parallelFor(&wk, int(tileList.size()), 16, [&](int t0, int t1) {  // after all reads of in
+    for (int t = t0; t < t1; ++t) {
+      const int T = Band::kTile, bx = tileList[size_t(t)] % bd.tw * T, by = tileList[size_t(t)] / bd.tw * T;
+      for (int y = by; y < std::min(by + T, h); ++y)
+        for (int x = bx; x < std::min(bx + T, w); ++x) {
+          const float v = res[size_t(bd.index(x, y))];
+          changedIn[size_t(t)] += v != in[size_t(y) * w + x];
+          out[size_t(y) * w + x] = v;
+        }
+    }
+  });
   for (size_t t = 0; t < tileList.size(); ++t) {
     st.largestShiftPx = std::max(st.largestShiftPx, largest[t]);
-    const int T = Band::kTile, bx = tileList[t] % bd.tw * T, by = tileList[t] / bd.tw * T;
-    for (int y = by; y < std::min(by + T, h); ++y)
-      for (int x = bx; x < std::min(bx + T, w); ++x) {
-        const float v = res[size_t(bd.index(x, y))];
-        st.pixelsChanged += v != in[size_t(y) * w + x];
-        out[size_t(y) * w + x] = v;
-      }
+    st.pixelsChanged += changedIn[t];
   }
   if (stats) *stats = st;
 }

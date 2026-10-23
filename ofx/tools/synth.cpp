@@ -30,7 +30,7 @@ double sdRoundBox(double x, double y, double cx, double cy, double hx, double hy
 }
 
 // The figure: head, neck, torso, a left arm on the hip enclosing a real background gap (about
-// 1.5 % of the frame, more than Max Hole %'s default 1 %), a hanging right arm, legs cut by the
+// 1.0 % of the frame (0.99 % measured: just under Max Hole %'s default 1 %, so the default fills it; Analyze Frame lowers it)), a hanging right arm, legs cut by the
 // bottom of the frame. Origin = frame centre.
 double sdFigure(double x, double y) {
   double d = sdCircle(x, y, 0, -330, 85);
