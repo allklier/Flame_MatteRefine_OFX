@@ -14,3 +14,8 @@ plugins' own operation code by ofx/tools/mr_guide_images.cpp. To make them again
 in-process; CUDA if available, else the CPU). A missing model skips its images (the tool prints
 SKIPPED); nothing is faked. The tool prints each image's settings and measurements; the same
 settings are given under each image in USERGUIDE.md. Scenes: 1920x1080, seed 1. Takes about 40 s.
+
+  # Matte Merge images (mm_*.png, USERGUIDE.md section 6): add -DMR_BUILD_MERGE=ON to either build above
+  # (ofx/merge/tools/mm_guide_images.inc, scene hair_flat / hair_busy from merge_synth.h, the real core):
+  cmake -S . -B build -DMR_BUILD_MERGE=ON && cmake --build build --target mr_guide_images
+  build/mr_guide_images docs/images

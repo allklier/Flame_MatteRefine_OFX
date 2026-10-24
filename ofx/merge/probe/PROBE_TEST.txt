@@ -1,0 +1,68 @@
+FLAME TEST FOR THE MATTE MERGE INPUT PROBE ("Merge Probe")
+==========================================================
+Written 2026-10-24. About 30 minutes (three Flame restarts). On akflame5.
+
+WHAT THIS TESTS
+  Matte Merge (ofx/merge/CLAUDE.md) needs a picture, a base matte (or trimap) and a detail matte.
+  The plan: a filter node, picture on the front, base matte on the source alpha socket, and ONE extra
+  clip "Detail" for the detail matte. Before writing Matte Merge we need to know:
+    (a) does Flame show the Detail clip as its own socket, and how does it deliver it, declared as a
+        plain RGBA clip versus a mask clip?
+    (b) which socket gets which input (the order is not knowable through OFX)?
+    (c) does the picture still arrive raw (not converted) with the extra clip present?
+    (d) which colourspace tag each clip reports.
+  The node does no matte processing: it passes the front + source alpha through and logs what it sees.
+
+VARIANTS (chosen when Flame loads the plugin, so each needs a Flame restart)
+  Key probe_detail_kind in ~/.config/matte-refine/config.conf (add one line, keep the other lines):
+    probe_detail_kind=none    baseline: no Detail clip (the layout of Matte Refine ML)
+    probe_detail_kind=rgba    Detail = an optional plain RGBA/RGB clip      (also the default if the key is missing)
+    probe_detail_kind=mask    Detail = an optional mask clip (Alpha/RGBA/RGB, as plugin 1's old Matte clip)
+
+SETUP (assistant builds; you do the sudo + restart)
+  1. sudo ln -s ~/MatteRefine_build/build_probe/MergeProbe.ofx.bundle /usr/OFX/Plugins/
+  2. Add "probe_detail_kind=none" to ~/.config/matte-refine/config.conf. Restart Flame.
+     The node is "Merge Probe" (group "Matte Refine").
+  3. Log: ~/.cache/matte-refine/logs/matte-refine.log. Probe lines carry "node=probe" (load) or
+     "node=probe:<id>" (a node). Follow it live:  tail -f ~/.cache/matte-refine/logs/matte-refine.log | grep probe
+
+FOOTAGE (the same three clips for every variant, ideally a log picture, e.g. the Log3G10 or LogC3 clip)
+  P = a picture (log, not Rec709, so a conversion is visible)
+  M = a base matte (e.g. the roto / LTX matte you use for Matte Refine)
+  D = a DIFFERENT matte, easy to tell apart from M by its range, e.g. M through a Colour Correct
+      with gain 0.5 (white = 0.5), or a matte that is black on most of the frame.
+  The footer shows each clip's alpha min-max, so M (0-1) and D (0-0.5) tell the sockets apart.
+
+TESTS (for each variant: none, then rgba, then mask; restart Flame after changing the key)
+  1. After the restart, check the log has
+       "==== Merge Probe 0.1.0 (...) load (describe): probe_detail_kind='<value>' -> variant <value>"
+     If that line is missing, Flame used a cached description: note it.
+  2. Add a NEW Merge Probe node (old nodes keep the clips they were made with). Note:
+       - how many input sockets, their labels / colours, and their order;
+       - the log line "createInstance ... variant X, Detail clip present/absent".
+  3. Connect P to the front socket, M to the source alpha socket (the second one), D to the third
+     socket if there is one. Note any socket Flame refuses, or connects differently.
+  4. Look at the footer. Example:
+       Probe rgba <git>: | Source 4ch a 0.000-1.000 rgb max 0.835 #1a2b3c | Detail 4ch a 0.000-0.500 rgb max 0.500 #...
+     Write it down. "Source a" should be M's range, "Detail a" D's range. If they are swapped or
+     both the same, that is the answer to (b).
+  5. "rgb max" of Source: about 0.84 = raw log (good); about 3-4 = converted to display (the bad case
+     seen with the old two-clip layout). Compare with the "none" run: should be the same value and
+     the same #checksum.
+  6. Swap: disconnect D, then disconnect M (one at a time); note the footer each time ("Detail off",
+     Source alpha 1.000-1.000 when nothing is on the source alpha).
+  7. Optional: put D on the source alpha socket and M on the Detail socket: the footer should swap.
+  8. Optional (rgba variant): feed D as an RGB clip with no alpha; note Detail's channels ("3ch" or "4ch").
+  Then Collect Logs from another node, or just send the log lines with "probe" in them.
+
+WHAT TO TELL THE ASSISTANT (per variant)
+  - sockets shown (count, labels, order) and whether D could be connected;
+  - the footer text with all three connected, and after steps 6 and 7;
+  - anything odd (a clip tagged "Matte", a red node, an error popup, a socket with no effect).
+  The log lines per render ("render clip Source/Detail ... cs=[...]", "render image ... pixels ...
+  R=min/mean/max ... A=...") hold the rest: colourspace tag, premultiplication, PAR, bounds,
+  components, the RGB checksum.
+
+AFTERWARDS
+  sudo rm /usr/OFX/Plugins/MergeProbe.ofx.bundle, remove probe_detail_kind from the config, restart Flame.
+  The probe is a test tool only: not packaged, not shipped.

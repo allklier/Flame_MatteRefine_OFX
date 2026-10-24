@@ -1,0 +1,93 @@
+FLAME TEST FOR MATTE MERGE 0.1.0 (plugin 3)
+===========================================
+Written 2026-10-24. About 45 minutes. On akflame5. Nothing here has been seen in Flame yet: every item is
+a first look.
+
+WHAT THIS TESTS
+  Matte Merge (ofx/merge/CLAUDE.md, decision 37): a base matte (or trimap) plus a detail matte in, one
+  combined matte out. The base keeps the subject and body edge; the detail matte (e.g. LTX Alpha Gen)
+  adds hair / fine edge detail near the base's edge only, aligned to the picture first.
+  Checked here: the sockets (the probe's "mask" layout), the footers, each View, each control, speed,
+  proxy, Batch Render, colour tags, logging and Collect Logs.
+
+SETUP (assistant builds; you do the sudo + restart)
+  1. sudo ln -s ~/MatteRefine_build/<build>/MatteMerge.ofx.bundle /usr/OFX/Plugins/
+     (the assistant gives the exact folder). Restart Flame.
+  2. The node is "Matte Merge" (group "Matte Refine"). One tab, five columns:
+       Matte (View, Version) · Zone (Source, Reach % of height, Keep Disconnected, Bridge % of height) ·
+       Align (Align) ·
+       Combine (Method, Detail Width % of height, Strength, Feather % of height) ·
+       Support (Picture Evidence, Debug Logging, Collect Logs)
+     Note if Flame lays it out differently (a second tab, an empty column, cut labels, doubles shown as
+     whole numbers).
+  3. Turn Debug Logging on (Support column): one DEBUG line per render. Log:
+       ~/.cache/matte-refine/logs/matte-refine.log   (lines with "node=mm:<id>"; load lines "node=mm")
+     Follow it live:  tail -f ~/.cache/matte-refine/logs/matte-refine.log | grep "mm"
+
+FOOTAGE
+  P = the picture (e.g. the Log3G10 kitchen clip)
+  B = a base matte for P (roto, a keyer or a guided model: good body edge, soft or missing hair)
+  D = a detail matte for P (LTX Alpha Gen: good hair, maybe offset / scaled / extra blobs)
+  T = optional: a trimap for P (black outside, white inside, grey band at the edge)
+
+CONNECT (the probe's layout: one red socket, two blue)
+  P -> the front (red) socket, B -> the first blue socket (source alpha), D -> the second blue socket
+  ("Detail"). Note if the sockets look different from the probe's mask variant.
+
+TESTS
+  1. Version label: "0.1.0 (<git>)". Log has "==== Matte Merge 0.1.0 (<git>) load (describe) ====".
+  2. Footers, one at a time:
+     a. Only P connected (no B, no D): "The source alpha is constant 1.00: connect the base matte or trimap
+        to the node's second socket (source alpha)." Output = the input, alpha 1.
+     b. P + B, no D: "Connect the detail matte to the Detail input." Alpha = B exactly.
+     c. P + B + D: an info line, e.g. "Align: picture: move + scale, +-0.12 px. Detail: 12.3k px kept,
+        1.2k dropped." Write it down for a few frames. "Align: no alignment (could not register)" means
+        the detail is used as it arrives.
+     d. Disconnect D again: back to b. Reconnect: back to c.
+     Say whether the info footer (not a warning) shows at all, and whether it stays when scrubbing
+     (it is only re-sent when its text changes).
+  3. Views (Matte column), with Method Add Fine Detail, all defaults:
+     Result Matte  RGB = the combined matte (should equal the matte output). Does it look like B plus D's hair?
+     Picture       RGB = P. Is it P as it looks in the input (raw), or converted? (With D connected Flame
+                   converted the picture in the probe; this is expected, note what you see.)
+     Added         what D added (white; green would mean the base was lowered: only with Zone Blend).
+                   Hair only? Any detail floating away from the head (= misaligned)?
+     Rejected      detail that was dropped (blobs, other objects, strands not connected to the subject).
+     Zone          where the detail may act (a band around B's edge).
+     Residual      where D's thick body still differs from B after alignment (bright = misaligned or
+                   a different shape).
+     For each: is the image in the viewer greyscale and not tone-mapped (colour tag "Matte"), and Picture
+     shown as a normal picture (tag = the source's)? A grey-looking matte means the tag was not applied.
+  4. Controls (View Result Matte or Added):
+     Reach % of height  2 / 6 / 15: the zone grows; does long hair come back at 15? Slower?
+     Bridge % of height 0 / 0.5 / 1.5 (Add Fine Detail, Matte Edge): at 0 is there a dark gap between the
+                        head and the strands? At 0.5 do the strands join the head? At 1.5 does the head get
+                        visibly fatter (the detail matte's body edge taken over)? DEBUG line "bridge=".
+     Detail Width       0.25 / 0.5 / 1.5: thicker strands counted as detail at higher values.
+     Strength           0 (= B) / 0.5 / 1.
+     Feather            0 (hard border at the zone's edge, look for a visible line) / 0.25 / 1.
+     Align              Off vs Auto: with Off, does the hair sit off the head? Footer "Align: off."
+     Method             Zone Blend: the detail replaces the base in the zone (the body edge may change).
+     Picture Evidence   On: fewer invented strands? Real ones lost? Compare with View Rejected.
+  5. Trimap: put T on the source alpha instead of B, Source = Trimap. The grey band is filled from D.
+     Keep Disconnected on: loose strands and blobs stay. Note what happens outside the grey band (it
+     should stay exactly black / white).
+  6. Speed: scrub 20 frames at full resolution; note whether it feels interactive. The DEBUG line has
+     "read / merge / write / render ... ms": send a few. Same at UHD if you have it.
+  7. Proxy mode (half resolution): the result should look the same as at full resolution (sizes are a %
+     of the height). DEBUG line "scale=0.5" and the frame size.
+  8. Batch Render 20 frames with D connected: no error, output alpha = the Result Matte.
+  9. Two Matte Merge nodes in one batch, different settings: each keeps its own.
+ 10. Save the batch, reload: settings kept, View kept, Debug Logging follows the per-user setting.
+ 11. Collect Logs: popup "Support bundle written to ~/matte-refine-support-<time>.tar.gz".
+
+WHAT TO TELL THE ASSISTANT
+  - the layout (tabs, columns, any cut labels), the sockets;
+  - the footers of test 2 (exact text);
+  - per View: what it shows, and whether the colour tag looked right;
+  - per control: the effect and anything wrong (hair floating off the head, a hard line, flicker);
+  - the DEBUG render lines for a few frames (they hold the align model, uncertainty, move, zone and
+    kept / dropped counts and the timings: no image data), or just press Collect Logs and send the bundle.
+
+AFTERWARDS
+  Keep the link for the next round, or: sudo rm /usr/OFX/Plugins/MatteMerge.ofx.bundle and restart Flame.

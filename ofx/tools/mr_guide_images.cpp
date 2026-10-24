@@ -9,6 +9,7 @@
 // models run in-process (CUDA, else the CPU). A missing model skips its image (printed), never a
 // stand-in. Panels are 8-bit; a matte is shown as grey; pictures are shown as their values, no
 // view transform. Settings per image: printed, and in USERGUIDE.md under each image.
+// With MR_BUILD_MERGE=ON the Matte Merge images (mm_*.png) are made too: ofx/merge/tools/mm_guide_images.inc.
 // Build: cmake --build <build> --target mr_guide_images (not in the default build). Needs zlib.
 #include <zlib.h>
 
@@ -31,6 +32,13 @@
 #include "ops/snap_to_image.h"
 #include "ops/solid_core.h"
 #include "synth.h"
+
+#include <cstdlib>
+
+#ifdef MR_GUIDE_MERGE
+#include "matte_merge.h"
+#include "merge_synth.h"
+#endif
 
 #ifdef MR_GUIDE_ML
 #include <unistd.h>
@@ -641,6 +649,10 @@ void temporal() {
 }
 #endif
 
+#ifdef MR_GUIDE_MERGE
+#include "mm_guide_images.inc"
+#endif
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -667,6 +679,11 @@ int main(int argc, char** argv) {
   temporal();
 #else
   std::printf("SKIPPED the Matte Refine ML images: built without MR_BUILD_ML\n");
+#endif
+#ifdef MR_GUIDE_MERGE
+  mmimg::all();
+#else
+  std::printf("SKIPPED the Matte Merge images: built without MR_BUILD_MERGE\n");
 #endif
   return gFailed ? 1 : 0;
 }
