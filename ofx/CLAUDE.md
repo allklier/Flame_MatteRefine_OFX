@@ -18,16 +18,15 @@ UNVERIFIED). Keep this file under ~250 lines.
   asks for the matte when the input matte is constant. An extra optional OFX clip (mask, General
   context) appeared as a third socket and received the matte too: redundant, removed. Output
   alpha = the refined matte; output RGB per View (11). Flame forces RGBA output; alpha is the
-  node's matte output (LTX decision 48). Saved nodes that used Luminance now read alpha.
-- **22. DECIDED (user, 2026-10-22, Flame test of 0.2.0): the matte has its own input; the
-  picture is optional.** With the matte only on Source's alpha, an unconnected front left the
-  node without size or colour info and it failed. Now: a "Matte" mask clip (Flame shows it as
-  an extra socket, seen in the probe), Source optional (General context only: a filter's Source
-  is mandatory), output RoD and PAR from the matte. Without a Matte input the matte is Source's
-  alpha (decision 4's route still works). Snap to Image and Foreground Colour need the picture
-  (same size as the matte), else they switch off with a footer note. Default View = Picture
-  (the picture passes through, the refined matte without one). UNVERIFIED in Flame: the
-  socket labels, colour-space info without a front input, and old filter-context nodes.
+  node's matte output (LTX decision 48). Saved nodes that used Luminance now read alpha. Again the only route since 2026-10-24 (decision 22 superseded): a filter, Source mandatory, no Matte clip.
+- **22. SUPERSEDED (user, 2026-10-24) by decision 4's layout for all three plugins.** 2026-10-22 (Flame test of 0.2.0) gave the
+  matte its own mask clip ("Matte", an extra socket) and made the picture optional, because with the matte only on Source's
+  alpha an unconnected front left the node without size or colour information and it failed. Decision 35 (2026-10-23) and the
+  Matte Merge probe (2026-10-24) then showed that connecting an extra mask clip makes Flame deliver the picture already
+  converted and tag Source "Matte". Now: **the picture on the front is mandatory** (it settles size, pixel aspect and
+  colourspace for Flame; a matte-only job connects the matte to both sockets), **the matte is Source's alpha**, there is no
+  Matte clip, and Snap to Image / Edge Colour Unmix always have their picture. Param ids and choice indexes are unchanged,
+  so saved setups load; old batches need their Matte input moved to the source alpha.
 - **23. DECIDED (user, 2026-10-23, Flame test): output colourspace tags; View on both tabs.**
   Without colour management Flame tagged the output with the working colourspace (ACEScg), so
   a matte on RGB was displayed through the ACES view and looked grey. Rules (user): picture
@@ -37,9 +36,9 @@ UNVERIFIED). Keep this file under ~250 lines.
   New 2026.1"); `ofxColour.h` + the native config header vendored from OFX_Release_1.5.1 (rest
   stays 1.4). The plugin declares OCIO style; `GetOutputColourspace` (unknown to the 1.4
   Support library, so the factory's entry point answers it and passes the rest on) returns
-  `OfxColourspace_Source` for View Picture with a picture, else "Matte" if the active OCIO
+  `OfxColourspace_Source` for View Picture, else "Matte" if the active OCIO
   config defines it (text check of the config file), else "Raw" (Core/Full) / "ofx_raw"
-  (Basic). The Matte mask clip has no colour management (spec). No input conversion is
+  (Basic). No input conversion is
   requested, so Foreground Colour unmixes in the picture's own colourspace (correct only if
   that is scene-linear: OPEN). **View on both tabs:** a second View (tab 2's first column)
   kept equal through changedParam (user edits only; the echo is ignored), both not animatable;

@@ -85,7 +85,7 @@ and colour rules as plugin 1 (decisions 22-24).
   old two-clip layout the picture arrived converted in both modes (35); in the filter layout both modes
   behave as specified. Fallback if it ever fails: OCIO in the runner (explicit dropdown).
 - **35. DECIDED (user, 2026-10-23): Matte Refine ML is a filter, like LTX Alpha Gen: picture required on
-  the front, the matte in its alpha. Supersedes decision 22 for ML only (plugin 1 keeps it).** Why: with
+  the front, the matte in its alpha. Supersedes decision 22 (plugin 1 followed on 2026-10-24).** Why: with
   the separate Matte mask clip (General context, Source optional) Flame 2027.2 delivered the picture
   converted to Rec.1886 even in Bypass and tagged the Source "Matte" (`PHASE0_RESULTS.md`, Colour probe;
   cause unexplained); LTX, a plain filter, does not. Decision 22's reason (a node without a picture)
@@ -172,9 +172,9 @@ and colour rules as plugin 1 (decisions 22-24).
      mattes (fgcolor, eroded, mixed_edge) and spills on busy backgrounds from 190: default stays 0, keep it <= about 150 frame px at any resolution;
      a wider symmetric band does nothing for hair; picture-guided reach rejected. Band / Outer px stay in frame pixels (x render scale). Runner:
      a hung runner is probed (STATUS, 1 s) and killed only when the peer pid and uid match; socket `runner-<8 hex of build id>.sock` per build;
-     runner logs as component "runner" (`mr::setLogComponent`, ofx/src/log); `runner-stderr.log` capped at 5 MiB. **OPEN:** the threaded trimap
+     runner logs as component "runner" (`mr::setLogComponent`, ofx/src/log); `runner-stderr.log` capped at 5 MiB. **DECIDED (user, 2026-10-24: quality over a minimal speed gain): threaded trimap stays OFF.** The threaded trimap
      (`signedEdgeDistanceThreaded`: HD -8 ms, UHD -16..-50 ms, but the band border moves up to 1 px and per-pixel results exceed the model noise: not
-     switched; the user decides); GPU 0 only; Collect Logs may not include `runner-stderr.log` (unchecked).
+     switched); GPU 0 only; Collect Logs may not include `runner-stderr.log` (unchecked).
 2. **Decision 28's gate:** stay inline / add a worker with Process + cache / both (inline for
    the light models, worker for DiffMatte). **PROPOSED thresholds** (the user sets them): a warm
    HD frame of a typical subject within about 1 s and no single frame longer than about 3 s
@@ -183,7 +183,7 @@ and colour rules as plugin 1 (decisions 22-24).
 3. B3 (BiRefNet guided fill), then B2 (DiffMatte) on the chosen architecture.
 4. B4 (temporal): needs neighbour frames (`setTemporalClipAccess`, UNVERIFIED in Flame) and
    probably the cache; last.
-5. Packaging: install script, model setup and licence gate, release notes, Mac build.
+5. Packaging: BUILT 2026-10-24, see `PACKAGING.md` (decision 38); left: Flame trial install, release notes, Mac (33).
 
 ## Phase 0 results: summary (details: `PHASE0_RESULTS.md`)
 

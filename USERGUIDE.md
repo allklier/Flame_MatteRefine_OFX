@@ -13,6 +13,7 @@ anything else, and fixes its defects. It does not pull a new matte from the pict
 3. [Matte Refine ML: the operations](#3-matte-refine-ml-the-operations)
 4. [Try it yourself: the test scenes](#4-try-it-yourself-the-test-scenes)
 5. [Which operation do I need?](#5-which-operation-do-i-need)
+6. [Matte Merge: combining two mattes](#6-matte-merge-combining-two-mattes)
 
 About the pictures: every before / after image in this guide was made from the synthetic test
 scenes (section 4) with the plugins' own code. The settings are given under each image. Mattes
@@ -25,41 +26,44 @@ Real footage decides how good an operation is on your shot, and on hair in parti
 
 ## 1. The nodes and how to connect them
 
-Both nodes are in Batch under **Matte Refine**.
+All three nodes are in Batch under **Matte Refine**.
 
 | Node | What it holds | Speed |
 |---|---|---|
 | **Matte Refine** | Eight classical operations: clean-up, hole filling, edge shape, edge colour | Real time. Every frame renders live as you scrub. |
 | **Matte Refine ML** | Operations driven by machine-learning models: Edge Refine and Smart Fill | Live as well, but needs an NVIDIA GPU. About 0.1-0.3 s per HD frame. |
+| **Matte Merge** | Combines a matte that is right about the subject with a second matte that has better edge detail (hair, fur), for example from LTX Alpha Gen (section 6) | Real time, CPU only. About 50-80 ms at UHD. |
 
-A third node, **Matte Merge**, is planned but not built yet. It will combine a main matte with an
-LTX Alpha Gen hair-detail matte, keeping the main matte and adding only the hair near its edge.
+**Platforms:** Rocky Linux (all three; Matte Refine ML needs an NVIDIA GPU) and macOS on Apple Silicon (Matte Refine and
+Matte Merge; Matte Refine ML is Linux only). Both have Mac packages; the Mac builds have been tested outside Flame but not in Flame yet.
 
-In both nodes each operation is its own column with an **Enable** switch. The enabled operations
+In Matte Refine and Matte Refine ML each operation is its own column with an **Enable** switch. The enabled operations
 run in a fixed order, left to right in the node, and each one works on the result of the one
 before. You cannot change the order. Each node has a **matte output**, which always carries
 the refined matte, and an **image output**, which shows whatever the **View** control picks.
 
 Pixel sizes (every control ending in "px") are in pixels of the full-resolution frame. When
-Flame renders a proxy they are scaled with it, so the result looks the same.
+Flame renders a proxy they are scaled with it, so the result looks the same. Matte Merge's sizes are percentages of
+the frame height, which does the same.
 
 ### Matte Refine: inputs
 
-- **Front (the picture): optional.** Only Snap to Image and Edge Colour Unmix need it. They
-  also need it to be the same size as the matte.
-- **Matte: the node's Matte input**, an extra socket on the node. If nothing is connected to it,
-  the node reads the matte from the **alpha of the front input** instead (Flame's source alpha
-  socket). Use one of the two.
-- The output frame takes its size from the matte, so the node works with only a matte connected.
+Wire it like Matte Refine ML and LTX Alpha Gen:
+
+- **Front (the picture): required.** Snap to Image and Edge Colour Unmix work on it; with the
+  other operations it simply passes through (View Picture).
+- **Matte: the node's second socket, the source alpha.** The matte arrives as the alpha of the
+  front clip. If you only have a matte, connect it to the front and the second socket.
+- The output frame has the picture's size.
 
 What the footer tells you:
 
 | Footer message | Meaning |
 |---|---|
-| *No matte: connect the matte to the Matte input.* | No matte arrived. |
-| *The input matte is constant 1.00: connect the matte to the Matte input.* | The matte is the same value everywhere. Usually nothing is connected and Flame delivers a solid alpha. |
-| *The picture and the matte differ in size: the picture is not used.* | Snap to Image and Edge Colour Unmix switch off. |
-| *Snap to Image and Edge Colour Unmix need the picture on the front input.* | One of those is on, but there is no picture. |
+| *The picture has no alpha, so there is no matte: connect the matte to the node's second socket (source alpha).* | The front clip arrived without an alpha. |
+| *The input matte is constant 1.00: no matte on the source alpha. Connect the matte to the node's second socket (source alpha).* | The matte is the same value everywhere. Usually nothing is connected to the second socket and Flame delivers a solid alpha. |
+| *No picture.* | Nothing arrived on the front input. |
+| *Edge Colour Unmix needs a scene-linear picture; the front input is ...* | Edge Colour Unmix is on and the picture is log or video: convert it to linear first. |
 | *Only 32-bit float images are supported.* | Set the input to 32-bit float. |
 
 Order of the operations: **Clean & Crush → Fill Holes → Solid Core → Contour Smooth → Shrink /
@@ -83,6 +87,8 @@ Wire it like LTX Alpha Gen:
 | *No picture.* | Nothing on the front. |
 | *The picture has no alpha, so there is no matte: connect the matte to the node's second socket (source alpha).* | The matte is missing. |
 | *The input matte is constant ...: no matte on the source alpha. ...* | The matte is the same everywhere; usually nothing is connected. |
+| *Matte Refine ML is not set up (licences not accepted / model files missing / CUDA libraries missing): run setup.sh as your normal user ...* | The one-time setup has not been run, or something it installed is missing. **The whole node passes the matte through** (Temporal too) until it is fixed. See the README, Install. |
+| *ViTMatte Base is not installed: run setup.sh --full.* (also *BiRefNet Full ...*) | You picked a full-size model that was not installed. Only that step is skipped. |
 | *Edge Refine runs on the CPU (slow): ...* / *Smart Fill runs on the CPU (slow): ...* | No usable GPU. It still works, but about ten times slower. |
 | *Temporal: ... The matte passes through this step.* / *Smart Fill: ... The matte passes through this step.* / *Edge Refine: ... The matte passes through.* | Something failed: a missing model, no runner, or a timeout. The node outputs the matte it received, unchanged, and tries again on the next frame. |
 
@@ -493,8 +499,13 @@ send it). The **Version** label in the Matte column shows which build is loaded.
 
 ## 3. Matte Refine ML: the operations
 
-**Requirements:** Rocky Linux with an NVIDIA GPU, and the model files installed in the model
-folder (see the install notes). It is not available on macOS yet. Without a usable GPU it falls
+**Requirements:** Rocky Linux with an NVIDIA GPU, and the one-time **setup** (`setup.sh`, run as your
+normal user after the plugin is installed; see the README). Setup shows the licences of the models and of NVIDIA's
+libraries, asks you to accept them, and downloads the models and libraries to your own folder
+(`~/.local/share/matte-refine-ml/`, about 1.9 GB). Until it has run, the node passes the matte through unchanged and
+the footer says so. It also offers the **full-size models** (ViTMatte Base, BiRefNet Full); if you declined, the Model
+and Segmentation dropdowns show them as *Base (not installed)* and *Full (not installed)*, and
+`setup.sh --full` adds them later. It is not available on macOS. Without a usable GPU it falls
 back to the CPU, about ten times slower, and says so in the footer.
 
 **The first frame is slower.** The first frame after Flame starts takes a few seconds while the
@@ -516,7 +527,7 @@ through unchanged, says why in the footer, and tries again on the next frame.
 | **Picture** (default) | The front input. With Auto, the picture as converted for the models. |
 | **Matte** | The refined matte as grey. |
 | **Trimap** | What Edge Refine uses: solid core white, the edge band it re-solves grey, clear background black. |
-| **Changes** | The input matte in grey; added alpha **green**, removed alpha **magenta**. *Note: these are the opposite colours of Matte Refine's Show Changes view.* |
+| **Changes** | The input matte in grey; added alpha **magenta**, removed alpha **green**: the same colours as Matte Refine's Show Changes view. |
 | **Holes** | The refined matte in grey; holes Smart Fill filled in **green**, holes it kept as real gaps in **red**. |
 
 ### Smart Fill
@@ -661,8 +672,8 @@ hole, because frame 4 has it too.*
 
 ### Model & Support
 
-**Model** (Small / Base, Edge Refine's model), **Debug Logging** and **Collect Logs**, as in
-Matte Refine. The log is shared with Matte Refine. Matte Refine ML has no Save Matte button.
+**Model** (Small / Base, Edge Refine's model; a model that setup has not installed is labelled *(not installed)*),
+**Debug Logging** and **Collect Logs**, as in Matte Refine. The log is shared with Matte Refine. Matte Refine ML has no Save Matte button.
 
 ---
 
@@ -685,12 +696,21 @@ Files per scene:
 | File | What it is | Where it goes in Flame |
 |---|---|---|
 | `<scene>_rgb.exr` | the picture | the front input |
-| `<scene>_matte.exr` | the input matte with the defect, as grey RGB | Matte Refine: the Matte input (or the source alpha). Matte Refine ML: the source alpha socket |
+| `<scene>_matte.exr` | the input matte with the defect, as grey RGB | Matte Refine and Matte Refine ML: the second socket (source alpha) |
 | `<scene>_truth.exr` | the clean matte | compare against the result |
 | `<scene>_fg.exr` | the true subject colour (`fgcolor`, `hair_flat`, `hair_busy`) | compare with Edge Colour Unmix |
 | `<scene>_label.exr` | `gaps` only: black background, dark grey subject, light grey defect hole, white real gap | which holes should fill |
 | `<scene>_matte.f32` + `.txt` | the matte as raw floats, as Save Matte writes it | analysis outside Flame |
 | `scenes.txt` | what each scene contains | |
+
+**Matte Merge scenes.** The Matte Merge test scenes (a head with hair strands, `hair_flat` and `hair_busy`, with a
+simulated detail matte) come from a second generator, `mm_synth <folder>`, built with the CMake option `MR_BUILD_MERGE`.
+Per scene: `<scene>_front.exr` (the picture with the coarse base matte in its alpha: one clip for the front and the
+source alpha), `<scene>_front_trimap.exr` (the same with a trimap in the alpha), `<scene>_detail.exr` (the detail
+matte: the Detail input), `<scene>_truth.exr` (the clean matte), and `merge_scenes.txt` (the detail matte's true shift
+and scale). The detail matte is deliberately blurred, shifted by a few pixels, scaled by 1 %, thickened at the body
+edge, and padded with a floating blob and invented strands, so the result is fainter than the true hair; compare the
+result with the detail matte, not with the truth (section 6).
 
 The `temporal` scene is a 9-frame sequence: `temporal_rgb.0000.exr` to `temporal_rgb.0008.exr`,
 and the same for `temporal_matte` and `temporal_truth`. The frame number comes last, so **each
@@ -755,6 +775,102 @@ Previews (picture | input matte | truth):
 | The edge detail is wrong compared with the picture | Edge Refine | Matte Refine ML |
 | A green or blue fringe, spill or halo in the soft edges | Edge Colour Unmix (scene-linear picture) | Matte Refine |
 | A green rim after growing the matte | Edge Colour Unmix, Ignore Outer px | Matte Refine |
-| Lost hair strands | Not recovered by any operation yet: Edge Refine restores the edge, not missing strands. Planned: Matte Merge with an LTX hair matte | |
+| Lost hair strands, and a second matte (e.g. LTX Alpha Gen) has them | Matte Merge (Add Fine Detail) | Matte Merge |
+| Added strands look cut off from the head (a dark rim) | Matte Merge, Bridge | Matte Merge |
+| Added strands are too faint | Matte Merge, Strength above 1 | Matte Merge |
+| A trimap with a grey band to fill from a second matte | Matte Merge, Source = Trimap | Matte Merge |
+| Lost hair strands, no second matte | Not recovered by any operation: Edge Refine restores the edge, not missing strands | |
 | Flicker between frames | Temporal | Matte Refine ML |
 | Not sure where to start | Analyze Frame, then read its message | Matte Refine |
+
+---
+
+## 6. Matte Merge: combining two mattes
+
+**Matte Merge** (third node, same group) takes a matte that is right about the subject but poor at the edge, and a second
+matte that has better edge detail (hair, fur, fuzzy cloth), and merges them. The first matte stays the source: where
+the second matte has detail near its edge, the node adds it, after lining it up with the first. Anything away from the edge,
+and detail that doesn't belong to the subject, is left out. The node's output is the combined matte and nothing else; it
+does no colour work (use Edge Colour Unmix for that).
+
+**Connect:** the picture to the front (red) socket; the **base matte** or a **trimap** to the first matte (blue) socket (the
+source alpha); the **detail matte** to the second matte socket, labelled Detail. The picture is required, even where it
+is only used as a guide. Without a Detail input the base passes through and the footer says so.
+
+![Matte Merge inputs on the hair_flat scene](docs/images/mm_inputs.png)
+
+*Scene `hair_flat`, crop of the head's hair line at 2x. Base matte | detail matte | truth. The base lost every strand; the detail matte has them, but blurred, shifted by a few pixels, with invented strands and a floating blob added.*
+
+![Matte Merge result](docs/images/mm_result.png)
+
+*Scene `hair_flat`, same crop. Base | result (Add Fine Detail, defaults, Strength 1.3) | truth. Align picked "picture: move + scale" (uncertainty 0.02 px). 41 % of the strand alpha the base lacks is brought back, and 31 % of the invented strands' alpha comes in with it. Strands stop at the zone border (Reach 6 % of the height); the synthetic strands are longer than real hair.*
+
+**Matte Edge or Trimap (Source).** *Matte Edge*: the zone where detail may be added is the base matte's edge plus **Reach**.
+*Trimap*: the base input is a trimap (black outside, white inside, grey = unknown); the unknown band is the zone and the
+detail fills it. Reach has no effect in Trimap mode, so make the grey band as wide as the detail you want.
+
+**Controls**
+- **Reach (% of frame height):** how far from the base matte's edge detail may be taken. Matte Edge only. It scales with the
+  frame size, so it works the same on a proxy.
+- **Keep Disconnected:** Trimap only. Detail in the grey band that does not connect back to the subject (a floating blob,
+  a stray strand) becomes background by default. Turn this on to keep it, for example for flyaway hairs that the detail
+  matte draws in separate pieces.
+- **Bridge (% of height, default 0.5; 0 = off):** joins the added strands to the subject. Add Fine Detail takes only the
+  detail matte's thin strands, but where strands meet the head the detail matte is thick (the hair roots and its own body
+  edge), so those parts were left out and the strands looked cut off by a dark rim. Where strands meet the base matte's
+  edge, Bridge also takes the detail matte as it is within this distance of the edge, fading to nothing at the set
+  distance, so strands grow out of the head. It only acts next to strands (within about twice the set distance of one): a
+  plain edge with no hair, such as a shoulder, is left exactly as the base matte has it, so the detail matte's own softer,
+  wider edge never shows as a grey line there. It never makes the base smaller. A larger value also moves the subject's edge
+  outwards next to the hair, towards the detail matte's edge (by at most this distance), so keep it small. It works only
+  with Add Fine Detail in Matte Edge mode, and Picture Evidence does not judge it.
+
+- **Align (Auto / Off):** lines the detail matte up with the picture before merging, correcting a small shift or scale
+  (LTX output often is). When it cannot do this reliably it applies no alignment, and the footer says so: a known offset is
+  better than a hidden drift. Off is for mattes that are already aligned.
+- **Method: Add Fine Detail (default)** takes only the thin structures of the detail matte and adds them to the base. It
+  never lowers the base, so the body edge stays exactly as it was. **Zone Blend** blends the zone towards the detail matte;
+  it recovers more, but it also takes the detail matte's own body edge, so use it when the base's edge is the weaker one.
+- **Detail Width (% of height):** structures thinner than this count as fine detail. A wider setting recovers thicker
+  strands and also lets more invented ones through.
+- **Strength:** 0 = the base only, 1 = the detail as it is. **Above 1 (up to 2) is a gain on the detail that is added**:
+  a blurred or weak detail matte has fainter strands than the real hair, and a value of about 1.3 to 1.8 brings them up. The gain is a
+  curve that lifts the weak, grey parts of the added detail most and leaves strong parts, which are already near white,
+  almost alone, so thin tips come up without the roots blowing out. It never lowers the matte and the result stays
+  within 0 to 1, but it brightens every weak strand, **including invented ones**, so raise it only as far as the strands
+  look right.
+- **Feather (% of height):** softens the zone's border so added detail fades in.
+- **Picture Evidence (Off by default):** keeps added detail only where the picture shows a thin structure there, which
+  removes many invented strands. It costs some real ones too, and it works less well on a busy background. Check the
+  Rejected view to see what it would remove.
+
+![Bridge](docs/images/mm_bridge.png)
+
+*Scene `hair_flat`, crop of the hair roots at 6x. Detail Width 5 %, Strength 2 (chosen to show the gap clearly), Reach 6 %. Bridge 0 | Bridge 0.5 % | truth. With Bridge 0 a dark rim separates the strands from the head; Bridge 0.5 % closes it.*
+
+![Strength](docs/images/mm_strength.png)
+
+*Scene `hair_flat`, same crop, defaults. Strength 1.0 | 1.5 | 2.0. Strand alpha brought back / invented strand alpha added: 34 % / 25 %, 44 % / 34 %, 51 % / 42 %. The gain lifts the weak strand tips most, and the invented strands too.*
+
+![Trimap source](docs/images/mm_trimap.png)
+
+*Scene `hair_flat`, Source = Trimap, defaults (Keep Disconnected off). Trimap (black / grey / white) | filled result | truth. The grey band is the zone and the detail fills it; strands beyond the band's end are cut.*
+
+![Picture Evidence](docs/images/mm_evidence.png)
+
+*Scene `hair_busy`, defaults, Strength 1.3. Evidence Off | Evidence On | truth. Red = invented strands (known from the scene). On removes about half of the invented strand alpha (31 % -> 16 %) but also costs real strand alpha (41 % -> 30 %).*
+
+**View** (the image output; the matte output is always the combined matte): **Result Matte**, **Picture**, **Added** (white
+= what the detail added; green = where Zone Blend lowered the base), **Rejected** (what was left out, whether by connectivity
+or evidence), **Zone** (where detail may act), **Residual** (how well the two mattes line up after alignment).
+
+![The Matte Merge views](docs/images/mm_views.png)
+
+*Scene `hair_flat`, defaults, Strength 1.3. Top: Added | Rejected (shown x4, max 0.145). Bottom: Zone | Residual (shown x4; the bright band along the head edge is the base's own edge, registration QC is the blocky grey area beyond it).*
+
+**What to expect.** The result can be no better than the detail matte: it brings in the strands that matte has, in the
+right place, at the brightness that matte gave them. It does not invent detail, and it does not remove the detail matte's own
+flaws except by the rules above. Compare the result with the detail matte (a wipe), not with an ideal answer. In the test
+scenes the detail matte is deliberately blurred, shifted and padded with invented strands, so the result is fainter than the
+true hair; Strength above 1 compensates.
+

@@ -19,8 +19,8 @@ Tags: **DECIDED** (maintainer approved), **PROPOSED** (recommended, not yet appr
 | `CLAUDE.md` (this) | goal, architecture, cross-cutting decisions, decision index, building / testing / releasing, roadmap, dead ends, conventions |
 | `ofx/CLAUDE.md` | the plugin layer: inputs, colour and views, render rules, platforms, Flame host behaviour, layout, logging and support |
 | `ofx/src/ops/CLAUDE.md` | the operations and their shared code: algorithms, params, measurements, synthetic mattes |
-| `ofx/merge/CLAUDE.md` | Matte Merge, the third plugin: two mattes (main + detail, e.g. LTX hair) in, one combined matte out; plan only |
-| `ofx/ml/CLAUDE.md` | Matte Refine ML, the second plugin: scope, plan, runtime, licences, risks; benchmark data in `ofx/ml/PHASE0_RESULTS.md`, licences in `ofx/ml/LICENCES.md` (plugin not built yet) |
+| `ofx/merge/CLAUDE.md` | Matte Merge, the third plugin: picture + base matte (or trimap) + detail matte in, one combined matte out; core and plugin built (0.1.0), Flame test pending |
+| `ofx/ml/CLAUDE.md` | Matte Refine ML, the second plugin: scope, plan, runtime, licences, risks; benchmark data in `ofx/ml/PHASE0_RESULTS.md`, licences in `ofx/ml/LICENCES.md`, packaging in `ofx/ml/PACKAGING.md` (plugin built, 0.1.0 dev) |
 
 Claude Code loads a nested `CLAUDE.md` when you work in its folder; this root file is always read,
 so keep it short and put detail where it belongs.
@@ -28,14 +28,14 @@ Code comments cite sections by title ("Plugin 1 operations", "Flame host behavio
 support", "Synthetic mattes"): grep the three files for the title.
 
 **Decision index** (numbers are stable; in `ofx/CLAUDE.md`: 4, 5, 6, 11, 13, 22, 23, 24, 25; in
-`ofx/src/ops/CLAUDE.md`: 7-10, 12, 15, 16, 20, 21, 26; in `ofx/ml/CLAUDE.md`: 29-36; in this file: 1, 2, 3, 14, 17, 18, 19, 27, 28):
+`ofx/src/ops/CLAUDE.md`: 7-10, 12, 15, 16, 20, 21, 26; in `ofx/ml/CLAUDE.md`: 29-36; in this file: 1, 2, 3, 14, 17, 18, 19, 27, 28, 37, 38):
 
 | # | Decision | In |
 |---|---|---|
 | 1 | one node, operations as sections | root |
 | 2 | same principles as LTX Alpha Gen | root |
 | 3 | an operation = a pure function + a param group | root |
-| 4 | picture on the front, matte on the Matte input / source alpha | ofx |
+| 4 | picture on the front (mandatory), matte on the source alpha (filter; all three plugins) | ofx |
 | 5, 6 | render is synchronous per frame; pixel params scale with render scale | ofx |
 | 7-10 | Fill Holes: principle, params, algorithm, fill value | ops |
 | 11 | View choice for the RGB output | ofx |
@@ -47,12 +47,13 @@ support", "Synthetic mattes"): grep the three files for the title.
 | 18, 27, 28 | two plugins; one repo, two bundles; ML inline first | root |
 | 19 | UI = one node, two tabs, one operation per column | root |
 | 20, 21 | shared edge geometry; synthetic mattes | ops |
-| 22 | the matte has its own input; the picture is optional | ofx |
+| 22 | superseded 2026-10-24: the picture is mandatory, matte on the source alpha, no Matte clip (as plugins 2 and 3) | ofx |
 | 23 | output colourspace tags; View on both tabs | ofx |
 | 24 | Edge Colour Unmix errors on a non-linear picture | ofx |
 | 25 | "Foreground Colour" is shown as "Edge Colour Unmix" | ofx |
 | 26 | Edge Colour Unmix "Ignore Outer px" (grown mattes) | ops |
 | 29, 30, 31 | ML runtime (ONNX Runtime, proposed); band-only tiled processing; ViTMatte usable behind the licence gate, not flagged non-commercial (decided) | ml |
+| 38 | packaging: install.sh (root) + setup.sh (per user, licence screen, downloads, hash gate in the node); two tarballs | root |
 | 37 | third plugin Matte Merge: main matte + detail matte (LTX hair) -> combined; separate plugin, classical first, same repo | root |
 | 36 | ML feature plan: B2 as a model choice, slow behind a Quality switch, BiRefNet 24 GB rule, B3 before B4 | ml |
 | 35 | Matte Refine ML is a filter (picture on the front, matte in its alpha); supersedes 22 for ML only | ml |
@@ -78,7 +79,7 @@ matte, it does not replace it (17). Started 2026-10-21.
 
 ```
 Flame ──OFX──> MatteRefine.ofx (one effect "Matte Refine", grouping "Matte Refine")
-   render(): matte = Matte input, else source alpha (4, 22) → clean → fill holes → solid core
+   render(): matte = Source alpha, picture = Source RGB (4) → clean → fill holes → solid core
              → contour smooth → shrink/grow → edge width → snap → edge colour unmix (enabled
              ones, fixed order, 3, 19) → RGBA: alpha = result, RGB per View (11, 23)
    ofx/src/ops/:   pure C++ on float mattes, no OFX types; unit-tested without a host
@@ -141,11 +142,26 @@ vendored copy) plus the two 1.5.1 colour headers (23, `VENDORED.txt`).
   (as LTX Alpha Gen) only if Flame locks up too much or it is too slow; decided on measurements
   (phase 0 benchmark, phase 1 Flame spike), see `ofx/ml/CLAUDE.md`.
 - **37. DECIDED (user, 2026-10-23): a third plugin, Matte Merge: a main matte plus a detail matte in, one combined
-  matte out.** The main matte (roto, a guided model, a keyer) keeps the subject and body edge; the detail matte (typically
-  LTX Alpha Gen, which is hard to aim at one object) supplies hair and fine detail near the main matte's edge only. Why a
+  matte out.** The main matte (roto, a guided model, a keyer) keeps the subject and body edge; the detail matte (any source with
+  better edge detail, e.g. LTX Alpha Gen hair) supplies that detail in a limited zone only (auto from the main matte's edge,
+  or the grey zone of a trimap), registered first; output = the combined matte only, no colour handling (user, 2026-10-24). Why a
   separate plugin: a different workflow (two mattes); plugin 1 stays one matte in / one out, plugin 2 model-based. Same
   repo and CMake project as 27 (own bundle, option default OFF), classical first (no model, no runner). Still decision 17:
   the main matte stays the source. Method, inputs risk and plan: `ofx/merge/CLAUDE.md` (PROPOSED, to be validated).
+- **38. DECIDED (user, 2026-10-24): packaging = `install.sh` (root: copies the bundles) + `setup.sh` (per user:
+  licence screen, downloads, config).** Why: the models, the CUDA libraries and their licences belong to the
+  artist who runs Flame, not to the admin who runs sudo; install-time downloads would make the licence acceptance
+  implicit, and LTX's in-node Setup tab is for a 6 GB Python install, far more than ML needs (about 2.5 GB, all
+  public). `setup.sh` (bash + curl, refuses root) shows `licences.txt` (ViTMatte MIT + Deep Image Matting
+  attribution, BiRefNet MIT, ONNX Runtime MIT, NVIDIA CUDA / cuDNN terms), asks to accept, asks whether to also
+  install the full models (default no), downloads from Hugging Face and PyPI with sha256 checks to
+  `~/.local/share/matte-refine-ml/`, and writes `ml_model_dir`, `ml_cuda_libs` and `ml_licence_accepted` (the sha256
+  of the shipped `licences.txt`, as LTX's gate, decision 38 there) into `~/.config/matte-refine/config.conf`. The node
+  downloads nothing: in a release bundle (`Contents/Resources/licences.txt` present) it passes the matte through with
+  a footer until the licence hash matches and the files exist; dev builds are not gated. Two tarballs: Matte Refine,
+  and Matte Refine ML (bundle + runner + ONNX Runtime in `Contents/Resources/lib`, no models, no CUDA libraries).
+  Weights only from stable hosts (memory rule). The gate covers the whole plugin (user, 2026-10-24); a "no" to the full models is
+  remembered (`ml_full_declined`), dropdowns show "(not installed)". BUILT: how it works in `ofx/ml/PACKAGING.md`.
 - **19. DECIDED (user, 2026-10-22): UI = one node, two tabs, one operation per column.** An op =
   Enable + at most 4 controls, off by default; paired ops share a column. Tab 1 "Fill & Core":
   Matte (View, Version) · Clean & Crush · Fill Holes · Fill Holes Edges · Solid Core · Support
@@ -168,7 +184,7 @@ vendored copy) plus the two 1.5.1 colour headers (23, `VENDORED.txt`).
   checks, the synthetic scenes against their truth (21), a UHD timing check, and a mutation
   check made when it was written. Run `ctest` in the build folder. Render scale (6) and the
   plugin layer (params, colour tags, views) are not unit-tested: they need Flame.
-- **System test:** NOT BUILT YET (after the first Flame test): a trimmed copy of LTX's
+- **System test:** a Flame-like host (`ofx/merge/systest/ofx_host.*`, copied from LTX) drives Matte Merge (`ofx/merge/systest`) and Matte Refine (`ofx/tests/refine_systest.cpp`, fast tier); plugin 2's ML tests use a scratch host. The full LTX-style one: a trimmed copy of LTX's
   Flame-like host (`systest/host`), fast tier only (no model): load/describe, defaults, render
   through the host, `setValue` recursion guard.
 - **Installer:** `packaging/install.sh` puts `MatteRefine.ofx.bundle` in `/usr/OFX/Plugins`
@@ -198,8 +214,10 @@ vendored copy) plus the two 1.5.1 colour headers (23, `VENDORED.txt`).
 - **LTX Alpha Gen: simplify its colour handling the same way** (user wish, 2026-10-23): Auto / Bypass through
   Flame's preferred-colourspace request instead of its Input colour dropdown (recorded in LTX's roadmap too;
   decision 34 in `ofx/ml/CLAUDE.md` has the verified mechanism).
-- **Matte Merge** (37): third plugin, plan in `ofx/merge/CLAUDE.md`; first step a Flame layout probe for picture + two mattes.
-- macOS: a Flame test and `package_release_mac.sh` (13).
+- **Matte Merge** (37): built 0.1.0 (probe run in Flame, core, plugin, systest); next the Flame test (`ofx/merge/package/MERGE_TEST.txt`), package it with the others (a third tarball or inside one release).
+- macOS (13, 33; user, 2026-10-24): Mac packages for **Matte Refine (plugin 1) and Matte Merge (plugin 3)**; Matte Refine ML stays
+  Linux-only. To do: a Mac build of Matte Merge (bundle layout, lbm build, tests, a first timing), a Flame test of both on the Mac,
+  `package_release_mac.sh` BUILT 2026-10-24 (`ofx/ml/PACKAGING.md`).
 - Not planned (14): a matte cache, a Process button.
 - Later, if needed: user-settable op order; a temporal option for Fill Holes (a hole crossing
   Max Hole % between frames can flicker).

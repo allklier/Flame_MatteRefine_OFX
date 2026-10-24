@@ -156,12 +156,12 @@ Strength was capped at 1. Called out in USERGUIDE section 6 (it also brightens i
 in Trimap mode the zone is the grey band, so Reach does nothing; the test trimap's band is narrower than the synthetic strands.
 
 **Mac (user, 2026-10-24):** Matte Merge ships on macOS (Apple Silicon) with plugin 1; no model or GPU part. BUILT and tested on lbm
-(M1 Ultra, 20 cores, macOS 26.7.1, build area `/Volumes/AvidMedia/ClaudeCode/Projects/MatteRefine_OFX/build`, `scripts/build_mac.sh`
+(M1 Ultra, 20 cores, macOS 26.7.1, `scripts/build_mac.sh`
 with `-DMR_BUILD_MERGE=ON`): `Contents/MacOS/MatteMerge.ofx` arm64 + `Info.plist`, ctest 19/19 (plugin 1's 13 + merge_core,
 scenes, align, ui, load_bundle, systest; `merge_bundle_exports` is Linux-only). No portability fixes were needed. Timing at
 2880x1620 (best of 3, reused workspace): Add + align 55 ms, + evidence 68, no align 39, Zone Blend 45, Trimap 50, Reach 380 + evidence
 80, all views 89 ms: the same as Linux (BFD 24 threads: 54 / 80). Dev symlink: `sudo ln -s
-/Volumes/AvidMedia/ClaudeCode/Projects/MatteRefine_OFX/build/MatteMerge.ofx.bundle /Library/OFX/Plugins/`. Not yet tried in Flame on the Mac.
+<Mac build folder>/build/MatteMerge.ofx.bundle /Library/OFX/Plugins/`. Not yet tried in Flame on the Mac.
 
 ## Reuse
 Plugin 1's `mr_ops` (edge distance, morphology, Workers); plugin 2's flow; footers and logging; P4 synthetic scenes
