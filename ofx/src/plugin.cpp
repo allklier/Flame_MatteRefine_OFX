@@ -1,7 +1,8 @@
 // Matte Refine OFX (CLAUDE.md): one node, matte operations as sections (decision 1), all
 // rendered inline in render(), no cache, no Process button (decision 14).
-// - The matte comes from the source alpha, Flame's matte input (decision 4); enabled ops run in a
-//   fixed order (3).
+// - A filter: the picture on the front (Source, mandatory), the matte in its alpha (Flame's second
+//   socket, source alpha; decision 4, as Matte Refine ML's decision 35); enabled ops run in a fixed
+//   order (3).
 // - Output: RGB = source (or the Show Filled view, 11), alpha = the refined matte.
 // - Layout follows Flame's rules: one group = one column of <= 5 rows (CLAUDE.md "Flame host").
 
@@ -58,10 +59,6 @@ using namespace mr;
 
 constexpr const char* kPluginId = "com.janklier.matterefine";
 constexpr const char* kPluginLabel = "Matte Refine";
-// Decision 22: the matte's own input (a mask clip; Flame shows it as an extra socket). The
-// picture on Source is optional; without a Matte input the matte is Source's alpha.
-constexpr const char* kMatteClip = "Matte";
-
 constexpr const char* kPView = "view";
 constexpr const char* kPView2 = "view2";  // the same View on tab 2, kept equal (decision 23)
 constexpr const char* kPFhEnable = "fhEnable";
@@ -152,7 +149,7 @@ int componentCount(OFX::PixelComponentEnum c) {
 float clamp01(float v) { return v > 0.0f ? (v < 1.0f ? v : 1.0f) : 0.0f; }  // NaN -> 0
 
 // The input matte (decision 4), top-down (OFX rows are bottom-up), clamped to 0-1 (decision 5).
-std::vector<float> extractMatte(const OFX::Image& src, bool rgbIsMatte = false) {
+std::vector<float> extractMatte(const OFX::Image& src) {
   const OfxRectI sb = src.getBounds();
   const int w = sb.x2 - sb.x1, h = sb.y2 - sb.y1, sc = componentCount(src.getPixelComponents());
   std::vector<float> matte(size_t(w) * h);
@@ -160,7 +157,7 @@ std::vector<float> extractMatte(const OFX::Image& src, bool rgbIsMatte = false) 
     const auto* p = static_cast<const float*>(src.getPixelAddress(sb.x1, y));
     float* m = &matte[size_t(sb.y2 - 1 - y) * w];
     for (int x = 0; x < w; ++x, p += sc) {
-      m[x] = clamp01(sc == 1 ? p[0] : sc == 4 ? p[3] : rgbIsMatte ? p[0] : 1.0f);
+      m[x] = clamp01(sc == 1 ? p[0] : sc == 4 ? p[3] : 1.0f);
     }
   }
   return matte;
@@ -189,7 +186,6 @@ class MatteRefineEffect : public OFX::ImageEffect {
   explicit MatteRefineEffect(OfxImageEffectHandle handle) : ImageEffect(handle) {
     src_ = fetchClip(kOfxImageEffectSimpleSourceClipName);
     dst_ = fetchClip(kOfxImageEffectOutputClipName);
-    matteClip_ = fetchClip(kMatteClip);
     view_ = fetchChoiceParam(kPView);
     view2_ = fetchChoiceParam(kPView2);
     fhEnable_ = fetchBooleanParam(kPFhEnable);
@@ -257,16 +253,8 @@ class MatteRefineEffect : public OFX::ImageEffect {
 
   void getClipPreferences(OFX::ClipPreferencesSetter& prefs) override {
     // Alpha carries the result, also for an RGB source (Flame forces RGBA anyway).
+    // Output size and PAR: the host's filter default, Source's.
     prefs.setClipComponents(*dst_, OFX::ePixelComponentRGBA);
-    if (!src_->isConnected() && matteClip_->isConnected())
-      prefs.setPixelAspectRatio(*dst_, matteClip_->getPixelAspectRatio());
-  }
-
-  // The output's size follows the matte (decision 22), so the picture can stay unconnected.
-  bool getRegionOfDefinition(const OFX::RegionOfDefinitionArguments& args, OfxRectD& rod) override {
-    if (!matteClip_->isConnected()) return false;
-    rod = matteClip_->getRegionOfDefinition(args.time);
-    return true;
   }
 
   void changedParam(const OFX::InstanceChangedArgs& args, const std::string& name) override {
@@ -310,36 +298,26 @@ class MatteRefineEffect : public OFX::ImageEffect {
       LOGE("render t=%g: host returned no output image", args.time);
       OFX::throwSuiteStatusException(kOfxStatFailed);
     }
-    // Decision 22: matte from the Matte input, else Source's alpha; the picture (Source) is
-    // optional and used only when it matches the matte's size.
+    // A filter (decision 4, as Matte Refine ML's 35): the picture is Source, the matte its alpha.
     std::string warning;
-    auto fetch = [&](OFX::Clip* c) {
-      std::unique_ptr<OFX::Image> img(c->isConnected() ? c->fetchImage(args.time) : nullptr);
-      if (img && img->getPixelDepth() != OFX::eBitDepthFloat) {
-        warning = "Only 32-bit float images are supported.";
-        img.reset();
-      }
-      return img;
-    };
-    std::unique_ptr<OFX::Image> src = fetch(src_), matteImg = fetch(matteClip_);
-    const OFX::Image* mi = matteImg ? matteImg.get() : src.get();
-    if (!mi && warning.empty()) warning = "No matte: connect the matte to the Matte input.";
+    std::unique_ptr<OFX::Image> src(src_->isConnected() ? src_->fetchImage(args.time) : nullptr);
+    if (src && src->getPixelDepth() != OFX::eBitDepthFloat) {
+      warning = "Only 32-bit float images are supported.";
+      src.reset();
+    }
+    const OFX::Image* mi = src.get();
+    if (!mi && warning.empty()) warning = "No picture.";
 
     const OfxRectI sb = mi ? mi->getBounds() : out->getBounds();
     const int w = sb.x2 - sb.x1, h = sb.y2 - sb.y1;
-    const OfxRectI pb = src ? src->getBounds() : sb;
-    if (matteImg && src && (pb.x1 != sb.x1 || pb.x2 != sb.x2 || pb.y1 != sb.y1 || pb.y2 != sb.y2)) {
-      warning = "The picture and the matte differ in size: the picture is not used.";
-      src.reset();
-    }
     const int sc = src ? componentCount(src->getPixelComponents()) : 0;
     int view = kViewPicture;
     view_->getValueAtTime(args.time, view);
-    if (!matteImg && src && sc == 3)
-      warning = "No matte: connect the matte to the Matte input.";
+    if (src && sc == 3)
+      warning = "The picture has no alpha, so there is no matte: connect the matte to the node's second "
+                "socket (source alpha).";
 
-    std::vector<float> matte =
-        mi ? extractMatte(*mi, mi == matteImg.get()) : std::vector<float>(size_t(w) * h, 0.0f);
+    std::vector<float> matte = mi ? extractMatte(*mi) : std::vector<float>(size_t(w) * h, 0.0f);
     std::string inLog;  // what actually arrived
     if (mi && !matte.empty()) {
       const auto mm = std::minmax_element(matte.begin(), matte.end());
@@ -347,7 +325,8 @@ class MatteRefineEffect : public OFX::ImageEffect {
         char b[160];
         // Flame delivers alpha 1.0 when nothing is on the source alpha input (probe, 2026-10-22).
         std::snprintf(b, sizeof b,
-                      "The input matte is constant %.2f: connect the matte to the Matte input.",
+                      "The input matte is constant %.2f: no matte on the source alpha. Connect the "
+                      "matte to the node's second socket (source alpha).",
                       *mm.first);
         warning = b;
       }
@@ -477,12 +456,7 @@ class MatteRefineEffect : public OFX::ImageEffect {
                     p.widthPx, p.amount, since(c0), st.pixelsChanged);
       opLog += b;
     }
-    bool snOn = on(snEnable_), fgOn = on(fgEnable_);
-    if ((snOn || fgOn) && !src) {
-      if (warning.empty())
-        warning = "Snap to Image and Edge Colour Unmix need the picture on the front input.";
-      snOn = fgOn = false;
-    }
+    const bool snOn = on(snEnable_), fgOn = on(fgEnable_);  // on() is false without Source
     const std::vector<float> rgb = snOn || fgOn ? extractRgb(*src) : std::vector<float>();
     if (snOn) {
       SnapParams p;
@@ -565,8 +539,6 @@ class MatteRefineEffect : public OFX::ImageEffect {
           const bool grey = a > 0.02f && a < 0.98f && sd[i] > 4.0f;
           px[0] = grey ? 1.0f : a;
           px[1] = px[2] = grey ? 0.15f : a;
-        } else if (!src) {  // Picture view without a picture: the refined matte
-          px[0] = px[1] = px[2] = a;
         } else if (!fg.empty()) {
           px[0] = fg[i * 3];
           px[1] = fg[i * 3 + 1];
@@ -604,15 +576,14 @@ class MatteRefineEffect : public OFX::ImageEffect {
   // Fill Holes and Solid Core for it; the popup says what was chosen and why. Pixel values come
   // back at the frame's own resolution and are stored in full-resolution units (decision 6).
   void analyzeFrameButton(double time, double scale) {
-    const bool own = matteClip_->isConnected();
-    std::unique_ptr<OFX::Image> img((own ? matteClip_ : src_)->fetchImage(time));
+    std::unique_ptr<OFX::Image> img(src_->fetchImage(time));
     if (!img || img->getPixelDepth() != OFX::eBitDepthFloat) {
       sendMessage(OFX::Message::eMessageError, "", "Analyze Frame: no 32-bit float matte.");
       return;
     }
     const OfxRectI b = img->getBounds();
     const int w = b.x2 - b.x1, h = b.y2 - b.y1;
-    const std::vector<float> matte = extractMatte(*img, own);
+    const std::vector<float> matte = extractMatte(*img);
     AnalysisResult r;
     analyzeFrame(matte.data(), w, h, &r);
     std::string text = "Analyze Frame:";
@@ -645,13 +616,12 @@ class MatteRefineEffect : public OFX::ImageEffect {
   }
 
   void saveMatte(double time) {
-    const bool own = matteClip_->isConnected();
-    std::unique_ptr<OFX::Image> src((own ? matteClip_ : src_)->fetchImage(time));
+    std::unique_ptr<OFX::Image> src(src_->fetchImage(time));
     if (!src || src->getPixelDepth() != OFX::eBitDepthFloat) {
       sendMessage(OFX::Message::eMessageError, "", "Save Matte: no 32-bit float matte.");
       return;
     }
-    const std::vector<float> matte = extractMatte(*src, own);
+    const std::vector<float> matte = extractMatte(*src);
     const OfxRectI b = src->getBounds();
     const std::string logs = logDir();
     const std::string dir = logs.substr(0, logs.rfind('/')) + "/dumps";
@@ -663,7 +633,7 @@ class MatteRefineEffect : public OFX::ImageEffect {
     raw.write(reinterpret_cast<const char*>(matte.data()), std::streamsize(matte.size() * sizeof(float)));
     std::ofstream txt(path + ".txt");
     txt << "width=" << (b.x2 - b.x1) << "\nheight=" << (b.y2 - b.y1)
-        << "\nformat=float32 little-endian, top row first, 0-1\nmatte_from=" << (own ? "Matte input" : "source alpha")
+        << "\nformat=float32 little-endian, top row first, 0-1\nmatte_from=source alpha"
         << "\ntime=" << time << "\n";
     const bool ok = raw.good() && txt.good();
     LOGI("saveMatte t=%g %dx%d -> %s.f32 %s", time, b.x2 - b.x1, b.y2 - b.y1, path.c_str(),
@@ -704,7 +674,6 @@ class MatteRefineEffect : public OFX::ImageEffect {
 
   OFX::Clip* src_;
   OFX::Clip* dst_;
-  OFX::Clip* matteClip_;
   OFX::ChoiceParam* view_;
   OFX::BooleanParam* fhEnable_;
   OFX::DoubleParam* fhThreshold_;
@@ -834,7 +803,7 @@ class MatteRefineFactory : public OFX::PluginFactoryHelper<MatteRefineFactory> {
     for (const auto& line : environmentSnapshot(hostInfo())) LOGI("env %s", line.c_str());
     desc.setLabels(kPluginLabel, kPluginLabel, kPluginLabel);
     desc.setPluginGrouping("Matte Refine");
-    desc.addSupportedContext(OFX::eContextGeneral);  // decision 22: Source may be unconnected
+    desc.addSupportedContext(OFX::eContextFilter);  // decision 4: as Matte Refine ML (its decision 35)
     desc.addSupportedBitDepth(OFX::eBitDepthFloat);
     desc.setSingleInstance(false);
     desc.setHostFrameThreading(false);
@@ -865,16 +834,7 @@ class MatteRefineFactory : public OFX::PluginFactoryHelper<MatteRefineFactory> {
     OFX::ClipDescriptor* src = desc.defineClip(kOfxImageEffectSimpleSourceClipName);
     src->addSupportedComponent(OFX::ePixelComponentRGBA);
     src->addSupportedComponent(OFX::ePixelComponentRGB);
-    src->addSupportedComponent(OFX::ePixelComponentAlpha);
-    src->setSupportsTiles(false);
-    src->setOptional(true);
-    OFX::ClipDescriptor* mc = desc.defineClip(kMatteClip);
-    mc->addSupportedComponent(OFX::ePixelComponentAlpha);
-    mc->addSupportedComponent(OFX::ePixelComponentRGBA);
-    mc->addSupportedComponent(OFX::ePixelComponentRGB);
-    mc->setOptional(true);
-    mc->setIsMask(true);
-    mc->setSupportsTiles(false);
+    src->setSupportsTiles(false);  // mandatory: the picture, the matte in its alpha (decision 4)
     OFX::ClipDescriptor* dst = desc.defineClip(kOfxImageEffectOutputClipName);
     dst->addSupportedComponent(OFX::ePixelComponentRGBA);
     dst->addSupportedComponent(OFX::ePixelComponentAlpha);
@@ -923,7 +883,7 @@ class MatteRefineFactory : public OFX::PluginFactoryHelper<MatteRefineFactory> {
                           "solid / edge / clear. Grey Inside: semi-transparent pixels deep "
                           "inside the matte, in red.");
     for (const char* c : kViewNames) view->appendOption(c);
-    view->setDefault(kViewPicture);  // decision 22: the picture passes through, the matte refined
+    view->setDefault(kViewPicture);  // the picture passes through, the matte refined (as Matte Refine ML)
     view->setAnimates(false);        // decision 23: two Views kept equal, no keyframes
     view->setParent(*gMatte);
     auto* version = labelled(desc.defineStringParam("version"), "Version", "");

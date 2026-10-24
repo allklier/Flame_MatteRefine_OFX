@@ -178,6 +178,14 @@ target_link_libraries(test_load_bundle PRIVATE dl)
 add_dependencies(test_load_bundle ${BUNDLE_NAME})
 add_test(NAME load_bundle
   COMMAND test_load_bundle ${BUNDLE_DIR}/Contents/${MR_ARCH_DIR}/${BUNDLE_NAME}.ofx)
+# System test: MatteRefine.ofx in the Flame-like host of Matte Merge (ofx/merge/systest/ofx_host.*,
+# from LTX Alpha Gen): the filter layout (decision 4), render = the ops run directly, the footers.
+add_executable(refine_systest ofx/tests/refine_systest.cpp ofx/merge/systest/ofx_host.cpp)
+target_include_directories(refine_systest PRIVATE ofx/merge/systest ${OFX_DIR}/include)
+target_link_libraries(refine_systest PRIVATE mr_ops mr_synth_lib ${CMAKE_DL_LIBS} Threads::Threads)
+add_dependencies(refine_systest ${BUNDLE_NAME})
+add_test(NAME refine_systest COMMAND refine_systest ${BUNDLE_DIR}/Contents/${MR_ARCH_DIR}/${BUNDLE_NAME}.ofx
+  ${CMAKE_BINARY_DIR}/systest_home)
 
 if(MR_BUILD_ML)
   add_subdirectory(ofx/ml)
