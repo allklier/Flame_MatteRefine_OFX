@@ -18,6 +18,7 @@
 #include <stdexcept>
 #include <vector>
 
+#include "gate.h"
 #include "log.h"
 
 namespace mr {
@@ -35,13 +36,8 @@ double msSince(Clock::time_point t) {
 // (libonnxruntime_providers_cuda.so) needs the first four by soname (readelf NEEDED); cuDNN
 // dlopens its sub-libraries by name (trying libX.so.9.27.0, .9.27, then .9). Opened RTLD_GLOBAL by
 // absolute path, they are then found by soname: Flame's process has no loader path to them and
-// LD_LIBRARY_PATH can't change after start.
-const char* const kCudaLibs[] = {
-    "libcudart.so.13", "libcublasLt.so.13", "libcublas.so.13", "libcurand.so.10",
-    "libcudnn_graph.so.9", "libcudnn_ops.so.9", "libcudnn_heuristic.so.9",
-    "libcudnn_engines_precompiled.so.9", "libcudnn_engines_runtime_compiled.so.9",
-    "libcudnn_engines_tensor_ir.so.9", "libcudnn.so.9",
-};
+// LD_LIBRARY_PATH can't change after start. The list: gate.h cudaLibName (packaging/setup.sh
+// installs exactly these; the gate checks them).
 
 // Loads the CUDA libraries once per process. Returns "" or what failed.
 std::string loadCudaLibs(const std::string& dir, int* loaded, double* ms) {
@@ -52,7 +48,8 @@ std::string loadCudaLibs(const std::string& dir, int* loaded, double* ms) {
   if (!done) {
     done = true;
     const auto t0 = Clock::now();
-    for (const char* name : kCudaLibs) {
+    for (int i = 0; i < cudaLibCount(); ++i) {
+      const char* name = cudaLibName(i);
       const std::string path = dir.empty() ? std::string(name) : dir + "/" + name;
       if (dlopen(path.c_str(), RTLD_NOW | RTLD_GLOBAL)) {
         ++count;

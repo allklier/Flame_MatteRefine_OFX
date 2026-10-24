@@ -6,10 +6,11 @@ Status as of 2026-10-23. Decision 31 (ViTMatte behind the licence gate) and the 
 
 | Model | Code | Weights | Status |
 |---|---|---|---|
-| BiRefNet | MIT (repo LICENSE read) | MIT per listings | the clear one; its training data's terms NOT checked |
+| BiRefNet | MIT, "Copyright (c) 2024 ZhengPeng" (repo LICENSE read 2026-10-24) | MIT per listings | the clear one; its training data's terms NOT checked |
 | DiffMatte | README says MIT, but **no LICENSE file** and GitHub reports `license: null`; no copyright holder named | **none stated anywhere** (README, Google Drive, paper, 10 issues; checked 2026-10-23, `research/diffmatte/B2_REPORT.md`); trained on Adobe DIM / Composition-1k like ViTMatte | decision 31's basis does NOT carry over: no LICENSE, no authors' statement, no vendor precedent found. Do not redistribute weights or ONNX files. Ask the authors first. |
 | ViTMatte | **MIT, verified** (LICENSE file: "Copyright (c) 2023 Hust Vision Lab") | HF card `hustvl/vitmatte-small-composition-1k`: tag Apache-2.0, "trained on Composition-1k", no restrictions stated. **Composition-1k = Adobe's Deep Image Matting dataset (CVPR 2017).** Secondary sources (LibreViTMattes card, which converts this checkpoint; FBA Matting repo) say Adobe's licence agreement allows models trained on it to be used and distributed only non-commercially, not sold, with the CVPR 2017 attribution kept; they say it binds the checkpoint, not the MIT code or independently trained weights | **UNVERIFIED at the source: Adobe's agreement text is not public** (the dataset is on request, contact in the dataset repos); whether "use" covers output on paid work is unknown. Backbone and its pretraining data not named on the pages read |
-| ONNX Runtime | MIT | n/a | UNVERIFIED: read the shipped licence |
+| ONNX Runtime | MIT, "Copyright (c) Microsoft Corporation" (LICENSE read inside the shipped 1.31.0 tarball, 2026-10-24); notices shipped in `THIRD_PARTY/` | n/a | verified |
+| NVIDIA CUDA 13 / cuDNN 9 (cuBLAS, CUDA runtime, cuRAND, cuDNN, from NVIDIA's PyPI wheels) | proprietary: `LicenseRef-NVIDIA-Proprietary` per each wheel's METADATA (CUDA Toolkit EULA; cuDNN: License Agreement for NVIDIA Software Development Kits) | n/a | not redistributed: `setup.sh` downloads them to the user; the wheels' licence texts are saved in `cuda_libs/licences/` |
 
 **Precedent and the authors' word (searched 2026-10-23; vendors not contacted):**
 - ONYX Ai Matte (ONYX; paid OFX plugin, lifetime licences €80 / €180 / €450; Resolve, Fusion, Nuke, "any

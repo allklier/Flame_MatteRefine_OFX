@@ -12,9 +12,9 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # Release version (0.1.0 = Fill Holes; 0.1.1 = Solid Core, View Matte default, Solid Above
-# 0.95, decimals, Save Matte, diagnostics; 0.1.2 = soft Solid Core (Feather px), macOS; 0.2.0 = Clean & Crush, Contour Smooth, Shrink/Grow, Edge Width, Snap to Image, Foreground Colour, QC views, matte on source alpha). Also the OFX plugin version (major.minor) and the
+# 0.95, decimals, Save Matte, diagnostics; 0.1.2 = soft Solid Core (Feather px), macOS; 0.2.0 = Clean & Crush, Contour Smooth, Shrink/Grow, Edge Width, Snap to Image, Foreground Colour, QC views, matte on source alpha; 0.3.0 = Analyze Frame, Ignore Outer px, colour management, speed; 0.4.0 = filter layout: picture mandatory, matte on the source alpha, no Matte clip). Also the OFX plugin version (major.minor) and the
 # release package name.
-set(MR_VERSION "0.3.0")
+set(MR_VERSION "0.4.0")
 string(REPLACE "." ";" MR_VERSION_PARTS "${MR_VERSION}")
 list(GET MR_VERSION_PARTS 0 MR_VERSION_MAJOR)
 list(GET MR_VERSION_PARTS 1 MR_VERSION_MINOR)

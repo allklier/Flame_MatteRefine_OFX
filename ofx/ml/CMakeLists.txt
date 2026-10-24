@@ -10,7 +10,7 @@ endif()
 find_library(ORT_LIB onnxruntime PATHS ${ORT_DIR}/lib NO_DEFAULT_PATH REQUIRED)
 
 # Edge Refine (B1) without a model or OFX: trimap, tiles, blend back (C++14; tests use a fake model).
-add_library(mr_ml_core STATIC src/edge_refine.cpp src/model_table.cpp)
+add_library(mr_ml_core STATIC src/edge_refine.cpp src/model_table.cpp src/gate.cpp)
 target_include_directories(mr_ml_core PUBLIC src)
 target_link_libraries(mr_ml_core PUBLIC mr_ops)
 target_compile_options(mr_ml_core PRIVATE -Wall -Wextra -fvisibility=hidden)
@@ -56,9 +56,12 @@ target_compile_options(mr_ml_server PRIVATE -Wall -Wextra -fvisibility=hidden)
 
 # mr_ml_runner: owns ORT, CUDA and the models; one per user and machine, started by the plugin.
 # Dev builds: inside the bundle, Contents/Resources/mr_ml_runner (where the plugin looks by
-# default), libonnxruntime through the RUNPATH = the ORT_DIR lib folder (absolute). A release
-# package will put ORT in Contents/Resources/lib ($ORIGIN/lib, also in the RUNPATH); the CUDA
-# libraries come from the config's ml_cuda_libs (runner_main.cpp).
+# default), libonnxruntime through the RUNPATH = the ORT_DIR lib folder (absolute), then
+# $ORIGIN/lib. MRML_BUNDLE_ORT=ON (release builds, scripts/package_release.sh): the ORT libraries
+# the runner needs are copied into Contents/Resources/lib and the RUNPATH is $ORIGIN/lib only, so
+# the bundle works wherever it is installed. The CUDA libraries come from the config's
+# ml_cuda_libs (runner_main.cpp; packaging/setup.sh installs them).
+option(MRML_BUNDLE_ORT "Release layout: ONNX Runtime inside the ML bundle, runner RUNPATH $ORIGIN/lib only" OFF)
 add_executable(mr_ml_runner src/runner_main.cpp)
 target_include_directories(mr_ml_runner PRIVATE ${ORT_DIR}/include)
 target_link_libraries(mr_ml_runner PRIVATE mr_ml_server mr_ml_ort ${CMAKE_DL_LIBS})
@@ -66,6 +69,19 @@ target_compile_options(mr_ml_runner PRIVATE -Wall -Wextra)
 set_target_properties(mr_ml_runner PROPERTIES CXX_STANDARD 17
   RUNTIME_OUTPUT_DIRECTORY ${MRML_BUNDLE_DIR}/Contents/Resources
   BUILD_RPATH "${ORT_DIR}/lib;\$ORIGIN/lib" INSTALL_RPATH "\$ORIGIN/lib")
+if(MRML_BUNDLE_ORT)
+  # The install RPATH at build time: without it CMake adds ORT_DIR/lib (a linked library's folder).
+  set_target_properties(mr_ml_runner PROPERTIES BUILD_WITH_INSTALL_RPATH ON)
+  # libonnxruntime.so.1 (the runner's NEEDED) with its versioned file, the provider bridge and the
+  # CUDA provider (ORT loads both from its own folder). Not the TensorRT provider.
+  file(GLOB MRML_ORT_LIBS ${ORT_DIR}/lib/libonnxruntime.so*)
+  list(APPEND MRML_ORT_LIBS ${ORT_DIR}/lib/libonnxruntime_providers_shared.so
+    ${ORT_DIR}/lib/libonnxruntime_providers_cuda.so)
+  add_custom_command(TARGET mr_ml_runner POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${MRML_BUNDLE_DIR}/Contents/Resources/lib
+    COMMAND cp -P ${MRML_ORT_LIBS} ${MRML_BUNDLE_DIR}/Contents/Resources/lib/
+    VERBATIM)
+endif()
 
 # The plugin (decision 27): bundle MatteRefineML.ofx.bundle, its own version. No ONNX Runtime and
 # no CUDA in it (decision 32; test ml_bundle_deps): tiles go to mr_ml_runner.
@@ -95,6 +111,9 @@ set_target_properties(MatteRefineML PROPERTIES PREFIX "" SUFFIX ".ofx"
 # neither; a model smoke test through the in-process wrapper (skipped, exit 77, without
 # MR_ML_MODELS; CUDA part skipped when no GPU is usable); the runner client against a fake runner;
 # the real runner (skipped without the model).
+add_executable(test_gate tests/test_gate.cpp)
+target_link_libraries(test_gate PRIVATE mr_ml_core)
+add_test(NAME ml_gate COMMAND test_gate)
 add_executable(test_edge_refine tests/test_edge_refine.cpp)
 target_link_libraries(test_edge_refine PRIVATE mr_ml_core mr_ops mr_synth_lib)
 add_test(NAME ml_edge_refine COMMAND test_edge_refine)

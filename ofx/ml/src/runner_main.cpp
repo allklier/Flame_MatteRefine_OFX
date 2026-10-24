@@ -11,7 +11,7 @@
 // or --quit retries CUDA), and every reply says why.
 //
 // Config (~/.config/matte-refine/config.conf, read at each RUN, cheap): ml_model_dir (default
-// ~/.cache/matte-refine-ml/models; a model at <dir>/<its table row's file>, "<id>/model.onnx"),
+// ~/.local/share/matte-refine-ml/models, gate.h defaultModelDir = packaging/setup.sh's; a model at <dir>/<its table row's file>, "<id>/model.onnx"),
 // ml_ep (cuda | cpu, default cuda: the EP of a request that asks for the default), ml_cuda_libs
 // (the CUDA 13 / cuDNN 9 folder; "" = the system's), log_level.
 //
@@ -32,6 +32,7 @@
 #include <string>
 #include <vector>
 
+#include "gate.h"
 #include "log.h"
 #include "ort_runner.h"
 #include "runner_client.h"
@@ -66,7 +67,7 @@ Cfg loadCfg() {
     auto it = c.find(k);
     return expandHome(it == c.end() || it->second.empty() ? def : it->second);
   };
-  return {get("ml_model_dir", homeDir() + "/.cache/matte-refine-ml/models"), get("ml_cuda_libs", ""),
+  return {get("ml_model_dir", defaultModelDir(homeDir())), get("ml_cuda_libs", ""),
           get("ml_ep", "cuda")};
 }
 
