@@ -29,6 +29,10 @@ if(NOT MR_GIT)
 endif()
 # Matte Refine ML tools (ofx/ml, decision 27): off by default, a plain build needs no ML runtime.
 option(MR_BUILD_ML "Build the Matte Refine ML tools" OFF)
+# Merge Probe (ofx/merge/probe): logging-only input-layout probe for Matte Merge (decision 37).
+# Matte Merge (ofx/merge, decision 37): off by default, as MR_BUILD_ML.
+option(MR_BUILD_MERGE "Build the Matte Merge core and its tests" OFF)
+option(MR_BUILD_MERGE_PROBE "Build the Matte Merge input probe plugin" OFF)
 set(OFX_DIR ${CMAKE_SOURCE_DIR}/third_party/openfx)
 set(BUNDLE_NAME MatteRefine)
 set(BUNDLE_DIR ${CMAKE_BINARY_DIR}/${BUNDLE_NAME}.ofx.bundle)
@@ -177,4 +181,15 @@ add_test(NAME load_bundle
 
 if(MR_BUILD_ML)
   add_subdirectory(ofx/ml)
+endif()
+if(MR_BUILD_MERGE)
+  add_subdirectory(ofx/merge)
+  if(TARGET mr_guide_images)  # the Matte Merge images (ofx/merge/tools/mm_guide_images.inc)
+    target_compile_definitions(mr_guide_images PRIVATE MR_GUIDE_MERGE=1)
+    target_include_directories(mr_guide_images PRIVATE ofx/merge/tools)
+    target_link_libraries(mr_guide_images PRIVATE mr_merge_core mr_merge_synth)
+  endif()
+endif()
+if(MR_BUILD_MERGE_PROBE)
+  add_subdirectory(ofx/merge/probe)
 endif()
