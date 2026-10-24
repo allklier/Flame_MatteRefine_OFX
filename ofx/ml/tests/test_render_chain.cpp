@@ -408,6 +408,13 @@ void testHolesView() {
   CHECK(c[0] == 0.0f && c[1] == 1.0f && c[2] == 0.0f);
   holesViewRgb(kMarkKept, 0.3f, c);
   CHECK(c[0] == 1.0f && c[1] == 0.0f && c[2] == 0.0f);
+  // Changes view = plugin 1's Show Changes: unchanged grey, raised magenta, lowered green.
+  changesViewRgb(0.4f, 0.4f, c);
+  CHECK(c[0] == 0.4f && c[1] == 0.4f && c[2] == 0.4f);
+  changesViewRgb(0.0f, 1.0f, c);
+  CHECK(c[0] == 1.0f && c[1] == 0.0f && c[2] == 1.0f);
+  changesViewRgb(1.0f, 0.0f, c);
+  CHECK(c[0] == 0.0f && c[1] == 1.0f && c[2] == 0.0f);
   // Marks against the brute-force holes and the core's decisions, on the test frame.
   const Frame f(320, 180);
   MaskSeg seg;
