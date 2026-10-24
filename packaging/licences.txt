@@ -1,0 +1,72 @@
+MATTE REFINE ML FOR FLAME - THIRD-PARTY MODELS AND LIBRARIES
+============================================================
+
+Matte Refine ML runs machine-learning models on your GPU. The models and the NVIDIA libraries are
+NOT part of the plugin: setup.sh downloads them to your machine, from the sources below, for your
+use under their own licences. By accepting you confirm that you have read these terms.
+(A summary, not legal advice; the licence texts govern.)
+
+1. ViTMatte (Edge Refine): the "Small" model, and "Base" if you choose the full models
+   What:     ViTMatte image matting model trained on Composition-1k, ONNX conversion
+   Licence:  MIT, "Copyright (c) 2023 Hust Vision Lab" (text below)
+   Source:   https://github.com/hustvl/ViTMatte (code and licence)
+             https://huggingface.co/hustvl/vitmatte-small-composition-1k (weights)
+             downloaded from https://huggingface.co/Xenova/vitmatte-small-composition-1k
+             and https://huggingface.co/Xenova/vitmatte-base-composition-1k (ONNX files)
+   Size:     Small 104 MB, Base 387 MB
+   Training data: the Composition-1k dataset from Deep Image Matting:
+             Ning Xu, Brian Price, Scott Cohen, Thomas Huang. "Deep Image Matting."
+             CVPR 2017. https://arxiv.org/abs/1703.03872
+
+2. BiRefNet (Smart Fill): the "Lite" model, and the full model if you choose the full models
+   What:     BiRefNet segmentation model (subject / background), ONNX conversion
+   Licence:  MIT, "Copyright (c) 2024 ZhengPeng" (text below)
+   Source:   https://github.com/ZhengPeng7/BiRefNet (code and licence)
+             downloaded from https://huggingface.co/onnx-community/BiRefNet_lite-ONNX
+             and https://huggingface.co/onnx-community/BiRefNet-ONNX (ONNX files)
+   Size:     Lite 224 MB, full 973 MB
+
+3. ONNX Runtime 1.31.0 (runs the models; shipped inside the plugin, not downloaded)
+   What:     Microsoft's inference runtime with its CUDA execution provider
+   Licence:  MIT, "Copyright (c) Microsoft Corporation" (text below); third-party notices in
+             THIRD_PARTY/onnxruntime-ThirdPartyNotices.txt in the release package
+   Source:   https://github.com/microsoft/onnxruntime/releases/tag/v1.31.0
+   Size:     317 MB (inside the plugin)
+
+4. NVIDIA CUDA 13 and cuDNN 9 runtime libraries (run the models on the GPU)
+   What:     cuBLAS 13.8.1.7, CUDA runtime 13.4.92, cuRAND 10.4.4.72, cuDNN 9.27.0.42 (cu13):
+             11 libraries taken from NVIDIA's Python packages
+   Licence:  NVIDIA's own terms, not open source: the NVIDIA CUDA Toolkit End User License
+             Agreement (cuBLAS, CUDA runtime, cuRAND) and the License Agreement for NVIDIA
+             Software Development Kits (cuDNN). setup.sh saves the full texts, as shipped in
+             NVIDIA's packages, next to the libraries (cuda_libs/licences/).
+   Source:   https://pypi.org/project/nvidia-cublas/13.8.1.7/
+             https://pypi.org/project/nvidia-cuda-runtime/13.4.92/
+             https://pypi.org/project/nvidia-curand/10.4.4.72/
+             https://pypi.org/project/nvidia-cudnn-cu13/9.27.0.42/
+             NVIDIA's current terms online: https://docs.nvidia.com/cuda/eula/index.html
+             and https://docs.nvidia.com/deeplearning/cudnn/latest/reference/eula.html
+   Size:     1.5 GB installed (1.0 GB download)
+
+Every file is checked against a fixed SHA-256 before it is used.
+
+------------------------------------------------------------------------------------------------
+MIT License (ViTMatte, BiRefNet, ONNX Runtime; each with its copyright line above)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

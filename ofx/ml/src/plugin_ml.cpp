@@ -30,6 +30,7 @@
 
 #include "edge_refine.h"
 #include "env_info.h"
+#include "gate.h"
 #include "log.h"
 #include "ocio_encoding.h"
 #include "ofxColour.h"
@@ -115,14 +116,21 @@ std::string expandHome(const std::string& p) {
   return p.compare(0, 2, "~/") == 0 ? homeDir() + p.substr(1) : p;
 }
 
-// The runner next to this binary: <bundle>/Contents/Resources/mr_ml_runner (this file is
-// <bundle>/Contents/<arch>/MatteRefineML.ofx). Config key ml_runner overrides it.
-std::string defaultRunnerPath() {
+// <bundle>/Contents/Resources (this file is <bundle>/Contents/<arch>/MatteRefineML.ofx): the
+// runner and, in a release bundle, licences.txt (the setup gate, gate.h).
+std::string bundleResourcesDir() {
   Dl_info info{};
-  if (!dladdr(reinterpret_cast<void*>(&defaultRunnerPath), &info) || !info.dli_fname) return "";
+  if (!dladdr(reinterpret_cast<void*>(&bundleResourcesDir), &info) || !info.dli_fname) return "";
   std::string p = info.dli_fname;
   for (int i = 0; i < 2; ++i) p = p.substr(0, p.rfind('/'));
-  return p + "/Resources/mr_ml_runner";
+  return p + "/Resources";
+}
+
+// The runner next to this binary: <bundle>/Contents/Resources/mr_ml_runner. Config key ml_runner
+// overrides it.
+std::string defaultRunnerPath() {
+  const std::string r = bundleResourcesDir();
+  return r.empty() ? "" : r + "/mr_ml_runner";
 }
 
 HostInfo hostInfo() {
@@ -410,13 +418,39 @@ class MatteRefineMLEffect : public OFX::ImageEffect {
     bool ran = false;
     std::string tmFooter;  // Temporal's footer (merged below)
     bool tmError = false;
-    if (src && (enable || sfEnable || tmEnable)) {
+    const UserConfig cfg = loadUserConfig();
+    auto get = [&](const char* k, const std::string& def) {
+      auto it = cfg.find(k);
+      return expandHome(it == cfg.end() || it->second.empty() ? def : it->second);
+    };
+    // The setup gate (gate.h, root decision 38): in a release bundle a missing setup (licences, the
+    // standard models, the CUDA libraries) turns every step off, Temporal too, and the footer says
+    // what is missing. A dev bundle is not gated.
+    const std::string modelDir = get("ml_model_dir", ml::defaultModelDir(homeDir()));
+    const ml::GateResult g = ml::checkGate(bundleResourcesDir(), cfg, modelDir, get("ml_cuda_libs", ""));
+    if (!g.open()) {
+      cp.temporal = cp.smartFill = cp.edgeRefine = false;
+      warning = g.footer + (warning.empty() ? std::string() : " " + warning);
+      error = true;
+    }
+    if (g.detail != gateLogged_) {  // one line when the gate's answer changes
+      if (!g.open()) LOGI("ml: setup gate closed: %s %s", g.footer.c_str(), g.detail.c_str());
+      else if (!gateLogged_.empty()) LOGI("ml: setup gate open");
+      gateLogged_ = g.detail;
+    }
+    // A selected model that is not installed (the full models are optional): that step passes the
+    // matte through, the footer says how to install it.
+    auto needModel = [&](bool* on, const char* id) {
+      if (!*on || ml::modelInstalled(modelDir, id)) return;
+      *on = false;
+      const std::string f = ml::notInstalledFooter(id);
+      warning = (warning.empty() ? f : warning + " " + f);
+      error = true;
+    };
+    needModel(&cp.smartFill, ml::segmentationModel(sfModel));
+    needModel(&cp.edgeRefine, kModelDirs[model]);
+    if (src && (cp.edgeRefine || cp.smartFill || cp.temporal)) {
       extractRgb(*src, rgb_);
-      const UserConfig cfg = loadUserConfig();
-      auto get = [&](const char* k, const std::string& def) {
-        auto it = cfg.find(k);
-        return expandHome(it == cfg.end() || it->second.empty() ? def : it->second);
-      };
       ml::RunnerClientOptions ro;
       ro.runnerPath = get("ml_runner", defaultRunnerPath());
       ro.tileTimeoutS = std::atof(get("ml_tile_timeout_s", "20").c_str());
@@ -432,7 +466,7 @@ class MatteRefineMLEffect : public OFX::ImageEffect {
       client_->resetStats();
       ml::RunnerSeg seg(*client_, ml::segmentationModel(sfModel));
       ml::Neighbours nb;  // Temporal (B4): the neighbour frames from the host
-      if (tmEnable) {
+      if (cp.temporal) {
         // A neighbour: Source at t + k, as the centre (picture RGB, matte = its alpha, decision 35).
         auto fetch = [&](double time, ml::FetchedFrame* f) {
           const auto tf = std::chrono::steady_clock::now();
@@ -551,9 +585,7 @@ class MatteRefineMLEffect : public OFX::ImageEffect {
         if (!inside) {
           px[0] = px[1] = px[2] = 0.0f;
         } else if (view == kViewChanges) {
-          // The input matte in grey; G = the result: added alpha shows green, removed magenta.
-          px[0] = px[2] = matte_[i];
-          px[1] = a;
+          ml::changesViewRgb(matte_[i], a, px);  // plugin 1's Show Changes colours
         } else if (view == kViewHoles) {
           ml::holesViewRgb(marks_.empty() ? uint8_t(ml::kMarkNone) : marks_[i], a, px);
         } else if (view == kViewMatte) {
@@ -594,7 +626,7 @@ class MatteRefineMLEffect : public OFX::ImageEffect {
          "core %.1f ms | runner pid %d: round trip %.1f model %.1f queue %.1f copy %.1f connect %.1f ms, "
          "reconnects %d starts %d replaced %d | read %.1f write %.1f render %.1f ms | colour %s, %s | picture %s "
          "| aborted=%s%s%s",
-         args.time, w, h, args.renderScale.x, kViewNames[std::min(std::max(view, 0), kViewLast)], int(enable),
+         args.time, w, h, args.renderScale.x, kViewNames[std::min(std::max(view, 0), kViewLast)], int(cp.edgeRefine),
          kModelNames[model], p.bandPx, p.outerPx, p.mix, int(onlyGrey), cs.ep.empty() ? "-" : cs.ep.c_str(),
          cs.sessionCreated ? ("new " + std::to_string(int(cs.loadMs)) + " ms").c_str() : ran ? "reused" : "-",
          st.tilesRun, st.tiles, st.tileSize, 100.0 * st.bandFraction, st.pixelsChanged, st.trimapMs, st.prepMs,
@@ -878,6 +910,7 @@ class MatteRefineMLEffect : public OFX::ImageEffect {
   std::string fnLast_;
   std::vector<uint8_t> marks_;  // view Holes
   std::unique_ptr<ml::RunnerClient> client_;  // this node's connection to mr_ml_runner
+  std::string gateLogged_;                     // the setup gate's last logged detail ("" = open)
   std::string clientPath_;
   double clientTimeout_ = 0;
 };
@@ -1008,11 +1041,19 @@ class MatteRefineMLFactory : public OFX::PluginFactoryHelper<MatteRefineMLFactor
       return p;
     };
 
+    const UserConfig cfg = loadUserConfig();  // the model folder, for the model choices' labels
+    const auto md = cfg.find("ml_model_dir");
+    const std::string modelDir =
+        md == cfg.end() || md->second.empty() ? ml::defaultModelDir(homeDir()) : expandHome(md->second);
+    LOGI("describe: model folder %s: %s %s, %s %s", modelDir.c_str(), kModelDirs[1],
+         ml::modelInstalled(modelDir, kModelDirs[1]) ? "installed" : "NOT installed", ml::segmentationModel(1),
+         ml::modelInstalled(modelDir, ml::segmentationModel(1)) ? "installed" : "NOT installed");
+
     auto* gMatte = group("grpMatte", "Matte");
     auto* view = labelled(desc.defineChoiceParam(kPView), "View",
                           "What the image output shows (the matte output is always the refined matte). "
                           "Picture: the Source input. Matte: the refined matte. Trimap: solid / edge band / "
-                          "clear. Changes: the input matte in grey, added alpha green, removed magenta. "
+                          "clear. Changes: the input matte in grey, added alpha magenta, removed green. "
                           "Holes: the refined matte in grey, holes Smart Fill filled in green, holes it kept "
                           "as real gaps in red.");
     for (const char* c : kViewNames) view->appendOption(c);
@@ -1069,7 +1110,10 @@ class MatteRefineMLFactory : public OFX::PluginFactoryHelper<MatteRefineMLFactor
            0.5, gSf);
     auto* seg = labelled(desc.defineChoiceParam(kPSfModel), "Segmentation",
                          "Lite: faster. Full: about 2x slower, more robust on low-contrast pictures.");
-    for (const char* c : kSegNames) seg->appendOption(c);  // stored as an index: append only
+    // Stored as an index: append only. The labels say which models are installed (read at describe:
+    // Flame describes again at its next start, so a setup is shown after a restart).
+    for (int i = 0; i < 2; ++i)
+      seg->appendOption(ml::optionLabel(kSegNames[i], ml::modelInstalled(modelDir, ml::segmentationModel(i))));
     seg->setDefault(sfDef.segmentation);
     seg->setParent(*gSf);
 
@@ -1090,7 +1134,8 @@ class MatteRefineMLFactory : public OFX::PluginFactoryHelper<MatteRefineMLFactor
     auto* gSupport = group("grpSupport", "Model & Support");
     auto* model = labelled(desc.defineChoiceParam(kPModel), "Model",
                            "ViTMatte Small (faster) or Base (about 1.2x slower).");
-    for (const char* c : kModelNames) model->appendOption(c);
+    for (int i = 0; i < 2; ++i)  // as Segmentation's labels
+      model->appendOption(ml::optionLabel(kModelNames[i], ml::modelInstalled(modelDir, kModelDirs[i])));
     model->setDefault(0);
     model->setParent(*gSupport);
     auto* dbg = boolean(kPDebugLog, "Debug Logging", "Verbose logging for troubleshooting (per user).", false,

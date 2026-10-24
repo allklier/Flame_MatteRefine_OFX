@@ -16,9 +16,13 @@ for lib in $needed; do
 done
 rpath=$(readelf -d "$ofx" | grep -E '\((RPATH|RUNPATH)\)')
 [ -z "$rpath" ] || { echo "FAIL: the plugin has a library path: $rpath"; fail=1; }
-if strings -a "$ofx" | grep -E 'libonnxruntime|libcudart|libcudnn|libcublas|OrtGetApiBase' >/dev/null; then
-  echo "FAIL: the plugin names an ORT / CUDA library or symbol (a dlopen of it?):"
-  strings -a "$ofx" | grep -E 'libonnxruntime|libcudart|libcudnn|libcublas|OrtGetApiBase' | head -5
+# It cannot load a library at run time: no dlopen / dlmopen / dlsym import (dladdr is fine). The CUDA
+# library names may appear: the setup gate (gate.h) checks that those files exist, nothing loads them.
+dl=$(nm -D --undefined-only "$ofx" | awk '{print $2}' | sed 's/@.*//' | grep -E '^(dlopen|dlmopen|dlsym|dlvsym)$')
+[ -z "$dl" ] || { echo "FAIL: the plugin imports $(echo $dl): it could load ORT / CUDA"; fail=1; }
+if strings -a "$ofx" | grep -E 'libonnxruntime|OrtGetApiBase' >/dev/null; then
+  echo "FAIL: the plugin names an ORT library or symbol:"
+  strings -a "$ofx" | grep -E 'libonnxruntime|OrtGetApiBase' | head -5
   fail=1
 fi
 exports=$(nm -D --defined-only "$ofx" | awk '$2 ~ /^[TDBVWRiu]$/ {print $3}' | sed 's/@.*//' | sort | tr '\n' ' ')
