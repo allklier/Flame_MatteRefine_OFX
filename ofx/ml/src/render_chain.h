@@ -7,6 +7,7 @@
 // unchanged and records the error (the plugin's footer); the chain goes on with the next step.
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -162,6 +163,19 @@ inline void holesViewRgb(uint8_t mark, float a, float* rgb) {
   rgb[0] = mark == kMarkKept ? 1.0f : mark == kMarkFilled ? 0.0f : a;
   rgb[1] = mark == kMarkFilled ? 1.0f : mark == kMarkKept ? 0.0f : a;
   rgb[2] = mark == kMarkNone ? a : 0.0f;
+}
+
+// View "Changes": the same colours as Matte Refine's Show Changes (plugin.cpp): the input matte m in
+// grey, raised pixels tinted magenta, lowered ones green; unchanged pixels stay grey.
+inline void changesViewRgb(float m, float a, float* rgb) {
+  const float d = a - m;
+  if (d >= 0.0f) {
+    rgb[0] = rgb[2] = m * (1.0f - d) + d;
+    rgb[1] = m * (1.0f - d);
+  } else {
+    rgb[0] = rgb[2] = a;
+    rgb[1] = std::min(1.0f, a - d);
+  }
 }
 
 }  // namespace ml
