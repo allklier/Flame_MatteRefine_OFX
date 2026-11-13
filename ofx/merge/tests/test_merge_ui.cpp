@@ -85,7 +85,9 @@ int main() {
   CHECK(std::strcmp(kAlignNames[0], "Auto") == 0 && std::strcmp(kAlignNames[1], "Off") == 0);
   CHECK(std::strcmp(kMethodNames[0], "Add Fine Detail") == 0 && std::strcmp(kMethodNames[1], "Zone Blend") == 0);
   CHECK(std::strcmp(kEvidenceNames[0], "Off") == 0 && std::strcmp(kEvidenceNames[1], "On") == 0);
-  CHECK(clampView(0) == kViewResult && clampView(5) == kViewResidual && clampView(6) == kViewResult &&
+  CHECK(std::strcmp(kViewNames[kViewRegion], "Region") == 0 && kViewRegion == 6);  // appended (Focus Region)
+  CHECK(clampView(0) == kViewResult && clampView(5) == kViewResidual && clampView(6) == kViewRegion &&
+        clampView(7) == kViewResult &&
         clampView(-1) == kViewResult && clampView(3) == kViewRejected);
 
   // Footers.
@@ -109,6 +111,16 @@ int main() {
   info.align.model = AlignModel::MatteFull;
   info.align.uncertaintyPx = 3.456;
   CHECK(infoFooter(info) == "Align: mattes: move + scale, +-3.46 px. Detail: 12.3k px kept, 678 dropped.");
+
+  // Focus Region: defaults (Grow 0, Feather 0.25 % inward, Snap off at strength 1), sizes, footers.
+  CHECK(ui.regionGrowPct == 0.0 && near(ui.regionFeatherPct, 0.25) && !ui.snap && ui.snapStrength == 1.0);
+  CHECK(near(regionPx(0.25, 1080), 2.7) && near(regionPx(-1.0, 2160), -21.6) && regionPx(0.0, 540) == 0.0);
+  CHECK(regionInfoFooter(info, 23456) ==
+        "Align: mattes: move + scale, +-3.46 px. Detail: 12.3k px kept, 678 dropped. Focus Region: 23.5k px.");
+  CHECK(std::string(kRegionNoDetailFooter).find("no candidate") != std::string::npos &&
+        std::string(kRegionNoDetailFooter).find("passes through") != std::string::npos);
+  CHECK(regionSizeMismatchFooter(960, 540, 1920, 1080).find("Focus Region is 960x540, the picture 1920x1080") !=
+        std::string::npos);
 
   // Output colourspace (decision 23 adapted).
   const std::string ocio = "OfxImageEffectColourManagementOCIO";

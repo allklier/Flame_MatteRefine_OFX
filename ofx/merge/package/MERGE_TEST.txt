@@ -11,7 +11,7 @@ WHAT THIS TESTS
   proxy, Batch Render, colour tags, logging and Collect Logs.
 
 SETUP (assistant builds; you do the sudo + restart)
-  1. sudo ln -s ~/MatteRefine_build/<build>/MatteMerge.ofx.bundle /usr/OFX/Plugins/
+  1. sudo ln -s ~/ClaudeCode/MatteRefine_build/<build>/MatteMerge.ofx.bundle /usr/OFX/Plugins/
      (the assistant gives the exact folder). Restart Flame.
   2. The node is "Matte Merge" (group "Matte Refine"). One tab, five columns:
        Matte (View, Version) · Zone (Source, Reach % of height, Keep Disconnected, Bridge % of height) ·

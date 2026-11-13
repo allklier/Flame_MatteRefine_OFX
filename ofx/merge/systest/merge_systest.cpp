@@ -2,7 +2,9 @@
 // synthetic merge scenes (tools/merge_synth.h) through it. Checks: describe (clips, contexts, Flame
 // layout: columns of <= 5 rows, <= 6 columns), the rendered alpha equals calling merge() directly
 // (every View's buffer too), the pass-through footers (no Detail, constant base), the output
-// colourspace answers, the changedParam echo guard, Collect Logs and Debug Logging.
+// colourspace answers, the changedParam echo guard, Collect Logs and Debug Logging; the Focus Region
+// socket (docs/focus_region.md) unconnected (= the output without it) and connected (= merge() with the
+// prepared region, Snap to Picture, View Region, its footers).
 // Usage: merge_systest <MatteMerge.ofx> <scratch HOME folder> (the plugin writes its log, config
 // and support bundle under $HOME: never the real one).
 #include <sys/stat.h>
@@ -17,6 +19,7 @@
 #include <vector>
 
 #include "matte_merge.h"
+#include "merge_fusion.h"
 #include "merge_synth.h"
 #include "merge_ui.h"
 #include "ofxParam.h"
@@ -86,7 +89,7 @@ struct Direct {
   mm::MergeInfo info;
 };
 Direct direct(const std::vector<float>& base, const std::vector<float>& detail, const std::vector<float>& rgb, int w,
-              int h, const mm::UiValues& ui) {
+              int h, const mm::UiValues& ui, const std::vector<float>* region = nullptr) {
   Direct d;
   const size_t n = size_t(w) * h;
   d.out.resize(n);
@@ -99,7 +102,24 @@ Direct direct(const std::vector<float>& base, const std::vector<float>& detail, 
   v.rejected = d.rejected.data();
   v.zone = d.zone.data();
   v.residual = d.residual.data();
-  mm::merge(base.data(), detail.data(), rgb.data(), w, h, mm::toMergeParams(ui, h), d.out.data(), v, &d.info);
+  if (!region) {
+    mm::merge(base.data(), detail.data(), rgb.data(), w, h, mm::toMergeParams(ui, h), d.out.data(), v, &d.info);
+    return d;
+  }
+  // As the plugin with the Focus Region connected: the prepared weight replaces the zone, then Snap.
+  std::vector<float> wt(n);
+  mm::prepareRegion(region->data(), w, h, mm::regionPx(ui.regionGrowPct, h), mm::regionPx(ui.regionFeatherPct, h),
+                    wt.data());
+  mm::FocusInput f;
+  f.weight = wt.data();
+  const mm::MergeParams p = mm::toMergeParams(ui, h);
+  mm::merge(base.data(), detail.data(), rgb.data(), w, h, p, d.out.data(), v, &d.info, nullptr, &f);
+  if (ui.snap) {
+    mm::snapInRegion(base.data(), d.out.data(), rgb.data(), wt.data(), w, h, ui.snapStrength, mm::snapParamsForHeight(h),
+                     p.source != mm::Source::Trimap);
+    for (size_t i = 0; i < n; ++i) d.added[i] = d.out[i] - base[i];
+  }
+  d.zone = wt;  // also what View Region shows
   return d;
 }
 
@@ -134,7 +154,7 @@ void checkLayout(Host& host) {
   }
   std::printf(" = %zu columns\n", cols.size());
   CHECK(cols.size() <= 6);
-  CHECK(cols.size() == 5);
+  CHECK(cols.size() == 6);
 }
 }  // namespace
 
@@ -164,7 +184,13 @@ int main(int argc, char** argv) {
   CHECK(d.props.getStr(kOfxImageEffectPluginPropGrouping) == "Matte Refine");
   CHECK(d.props.getStr(kOfxImageEffectPropSupportedContexts, 0) == kOfxImageEffectContextFilter);
   CHECK(d.clips.count(kOfxImageEffectSimpleSourceClipName) && d.clips.count("Detail") &&
-        d.clips.count(kOfxImageEffectOutputClipName) && d.clips.size() == 3);
+        d.clips.count("FocusRegion") && d.clips.count(kOfxImageEffectOutputClipName) && d.clips.size() == 4);
+  if (d.clips.count("FocusRegion")) {
+    const PropSet& rp = d.clips["FocusRegion"]->props;
+    CHECK(rp.getInt(kOfxImageClipPropIsMask) == 1 && rp.getInt(kOfxImageClipPropOptional) == 1);
+    CHECK(rp.getStr(kOfxImageEffectPropSupportedComponents, 0) == kOfxImageComponentAlpha);
+    CHECK(rp.getStr(kOfxPropLabel) == "Focus Region");
+  }
   if (d.clips.count("Detail")) {
     const PropSet& dp = d.clips["Detail"]->props;
     CHECK(dp.getInt(kOfxImageClipPropIsMask) == 1 && dp.getInt(kOfxImageClipPropOptional) == 1);
@@ -187,6 +213,8 @@ int main(int argc, char** argv) {
         inst->getDouble("strength") == 1.0 && inst->getDouble("feather") == 0.25 &&
         inst->getDouble("zoneBridge") == 0.5);
   CHECK(inst->getString("version").find("0.1.0") == 0);
+  CHECK(inst->getDouble("regionGrow") == 0.0 && inst->getDouble("regionFeather") == 0.25 &&
+        inst->getInt("regionSnap") == 0 && inst->getDouble("regionSnapStrength") == 1.0);
   CHECK(inst->getString("nodeId").size() == 8);
 
   // 1. Default render = merge() called directly, bit for bit; RGB = the matte; footer = the info line.
@@ -342,6 +370,83 @@ int main(int argc, char** argv) {
   CHECK(diffChannel(r, ones, 3) == 0);
   CHECK(noBase->persistent == mm::constantBaseFooter(1.0f));
   std::printf("no base: footer '%s'\n", noBase->persistent.c_str());
+
+  // 7b. Focus Region. Unconnected: every render above equals merge() without a region (bit for bit the
+  // core before the region: docs/focus_region.md "Tests"). Connected: a soft disc over the top of the head.
+  {
+    std::vector<float> disc(size_t(W) * H), empty(size_t(W) * H, 0.0f);
+    int top = H / 2;
+    for (int y = 0; y < H; ++y)
+      if (sc.base[size_t(y) * W + W / 2] >= 0.5f) {
+        top = y;
+        break;
+      }
+    for (int y = 0; y < H; ++y)
+      for (int x = 0; x < W; ++x)
+        disc[size_t(y) * W + x] =
+            float(std::min(1.0, std::max(0.0, (0.12 * H - std::hypot(x - W / 2.0, y - double(top))) / 8.0 + 0.5)));
+    auto reg = host.createInstance(W, H, 1,
+                                   Feeds{{kOfxImageEffectSimpleSourceClipName, rgbaFeed(&sc.rgbDisplay, &sc.base)},
+                                         {"Detail", alphaFeed(&sc.detail)},
+                                         {"FocusRegion", alphaFeed(&disc)}},
+                                   ocioPath);
+    mm::UiValues ur;
+    const Direct dr = direct(sc.base, sc.detail, sc.rgbDisplay, W, H, ur, &disc);
+    long regionPx = 0, outside = 0, inside = 0;
+    for (float v : dr.zone) regionPx += v > 0.0f;
+    r = reg->render(0);
+    for (size_t i = 0; i < dr.out.size(); ++i) (dr.zone[i] > 0 ? inside : outside) += dr.out[i] != sc.base[i];
+    std::printf("region: alpha differs from merge() at %ld px; %ld px region, %ld changed inside, %ld outside; "
+                "footer '%s'\n",
+                diffChannel(r, dr.out, 3), regionPx, inside, outside, reg->persistent.c_str());
+    CHECK(diffChannel(r, dr.out, 3) == 0 && outside == 0 && inside > 100);
+    CHECK(diffChannel(r, ref.out, 3) > 0);  // the region changed the result
+    CHECK(reg->persistent == mm::regionInfoFooter(dr.info, regionPx));
+    reg->setInt("view", mm::kViewRegion);
+    r = reg->render(0);
+    CHECK(diffChannel(r, dr.zone, 0) == 0 && diffChannel(r, dr.zone, 2) == 0 && diffChannel(r, dr.out, 3) == 0);
+    reg->setInt("view", mm::kViewZone);
+    r = reg->render(0);
+    CHECK(diffChannel(r, dr.zone, 1) == 0);
+    // Snap to Picture 0.7, Grow 0.4 %, Feather 0: = the direct path; Added view = out - base after the snap.
+    reg->setBool("regionSnap", true);
+    reg->setDouble("regionSnapStrength", 0.7);
+    reg->setDouble("regionGrow", 0.4);
+    reg->setDouble("regionFeather", 0.0);
+    ur.snap = true;
+    ur.snapStrength = 0.7;
+    ur.regionGrowPct = 0.4;
+    ur.regionFeatherPct = 0.0;
+    const Direct ds = direct(sc.base, sc.detail, sc.rgbDisplay, W, H, ur, &disc);
+    reg->setInt("view", mm::kViewAdded);
+    r = reg->render(0);
+    std::vector<float> pos(ds.added.size());
+    for (size_t i = 0; i < pos.size(); ++i) pos[i] = std::max(ds.added[i], 0.0f);
+    long snapOutside = 0;
+    for (size_t i = 0; i < ds.out.size(); ++i) snapOutside += ds.zone[i] <= 0 && ds.out[i] != sc.base[i];
+    std::printf("region + snap: alpha differs from the direct path at %ld px; %ld changed outside\n",
+                diffChannel(r, ds.out, 3), snapOutside);
+    CHECK(diffChannel(r, ds.out, 3) == 0 && diffChannel(r, pos, 0) == 0 && snapOutside == 0);
+    CHECK(diffChannel(r, dr.out, 3) > 0);
+    // Detail disconnected: no candidate yet, the base passes through; View Region still shows the region.
+    reg->setInt("view", mm::kViewRegion);
+    reg->setFeed("Detail", Feed{});
+    r = reg->render(0);
+    CHECK(diffChannel(r, sc.base, 3) == 0 && diffChannel(r, ds.zone, 0) == 0);
+    CHECK(reg->persistent == mm::kRegionNoDetailFooter);
+    std::printf("region, no detail: footer '%s'\n", reg->persistent.c_str());
+    // An empty (black) region: the base passes through with its footer.
+    reg->setFeed("Detail", alphaFeed(&sc.detail));
+    reg->setFeed("FocusRegion", alphaFeed(&empty));
+    reg->setInt("view", mm::kViewResult);
+    r = reg->render(0);
+    CHECK(diffChannel(r, sc.base, 3) == 0 && reg->persistent == mm::kRegionEmptyFooter);
+    // Disconnected again: the output without a region, bit for bit (the region params are ignored).
+    reg->setFeed("FocusRegion", Feed{});
+    r = reg->render(0);
+    CHECK(diffChannel(r, ref.out, 3) == 0 && diffChannel(r, ref.out, 0) == 0 && reg->persistent == mm::infoFooter(ref.info));
+    std::printf("region disconnected: alpha differs from the default render at %ld px\n", diffChannel(r, ref.out, 3));
+  }
 
   // 8. Support: Debug Logging writes the per-user config and turns on the DEBUG render line;
   // Collect Logs writes a bundle into $HOME; no echo recursion; no host errors.

@@ -127,7 +127,7 @@ void scaleToHeight(MergeParams& p, const HeightSizes& s, int h) {
 }
 
 void merge(const float* base, const float* detail, const float* picture, int w, int h, const MergeParams& p,
-           float* out, const MergeViews& views, MergeInfo* info, MergeWorkspace* wsp) {
+           float* out, const MergeViews& views, MergeInfo* info, MergeWorkspace* wsp, const FocusInput* focus) {
   const size_t n = size_t(w) * h;
   Workers wk;
   MergeWorkspace localWs;
@@ -144,6 +144,16 @@ void merge(const float* base, const float* detail, const float* picture, int w, 
   MergeInfo inf;
   inf.reg.cx = (w - 1) / 2.0;
   inf.reg.cy = (h - 1) / 2.0;
+  // Focus Region (matte_merge.h FocusInput): its weight, clamped to 0-1 (NaN: 0), replaces the zone.
+  const bool region = focus && focus->weight;
+  std::vector<float>& rw = ws.region;
+  if (region) {
+    rw.resize(n);
+    forPixels(&wk, w, h, [&](size_t i) {
+      const float v = focus->weight[i];
+      rw[i] = v > 0.0f ? std::min(v, 1.0f) : 0.0f;
+    });
+  }
 
   // 1. The zone and its feather ramp. (Workspace buffers: resized, every pixel written below.)
   std::vector<uint8_t>& zone = ws.zone;
@@ -186,6 +196,20 @@ void merge(const float* base, const float* detail, const float* picture, int w, 
     forPixels(&wk, w, h, [&](size_t i) { ramp[i] = zone[i]; });
   }
   inf.zonePixels = long(std::count(zone.begin(), zone.begin() + n, uint8_t(1)));
+  // Focus Region: the region replaces the zone (and its ramp: the weight is applied after the combine).
+  // The automatic zone is kept for the alignment only: the move is global, and a small region alone
+  // left too little thin detail to register (systest 2026-11-12: "no alignment" instead of picture
+  // move + scale).
+  std::vector<uint8_t>& alignZone = ws.alignZone;
+  const long alignZonePixels = inf.zonePixels;
+  if (region) {
+    alignZone.assign(zone.begin(), zone.begin() + n);
+    forPixels(&wk, w, h, [&](size_t i) {
+      zone[i] = rw[i] > 0.0f;
+      ramp[i] = zone[i];
+    });
+    inf.zonePixels = long(std::count(zone.begin(), zone.begin() + n, uint8_t(1)));
+  }
 
   // Trimap: the prior ramp from the known foreground (1) to the known background (0).
   std::vector<float>& prior = ws.prior;
@@ -216,8 +240,9 @@ void merge(const float* base, const float* detail, const float* picture, int w, 
   });
   const int openR = openRadius(p.detailWidthPx);
   inf.align.model = AlignModel::Off;
-  if (p.align && inf.zonePixels > 0) {
-    const Registration reg = estimateAlign(base, da.data(), picture, w, h, trimap, openR, zone.data(), &wk, &inf.align);
+  if (p.align && alignZonePixels > 0) {
+    const Registration reg = estimateAlign(base, da.data(), picture, w, h, trimap, openR,
+                                           region ? alignZone.data() : zone.data(), &wk, &inf.align);
     if (inf.align.model != AlignModel::None) {
       inf.reg = reg;
       inf.reg.ok = true;
@@ -228,6 +253,41 @@ void merge(const float* base, const float* detail, const float* picture, int w, 
     }
   } else if (p.align) {
     inf.align.model = AlignModel::None;
+  }
+
+  // 2b. Focus Region with extra candidates: fuse the aligned Detail matte (candidate a) with them
+  // (merge_fusion.h); the fused map is the detail from here on. Candidate (a)'s confidence: the
+  // picture evidence on its thin structures (Evidence On), 1 on thick parts; nullptr (1) otherwise.
+  const bool fused = region && focus->extra && focus->extraCount > 0;
+  if (fused) {
+    const float* confA = nullptr;
+    if (p.evidence && picture) {
+      std::vector<float>& op = ws.opened;
+      std::vector<float>& fa = ws.fine;
+      std::vector<float>& ev = ws.ev;
+      std::vector<float>& conf = ws.conf;
+      op.resize(n);
+      fa.resize(n);
+      ev.resize(n);
+      conf.resize(n);
+      opening(da.data(), w, h, openR, op.data(), &wk, &ws.morph);
+      forPixels(&wk, w, h, [&](size_t i) {
+        fa[i] = zone[i] ? std::max(0.0f, da[i] - op[i]) : 0.0f;
+        tmp[i] = fa[i] > 0.01f;
+      });
+      pictureEvidence(picture, fa.data(), tmp.data(), w, h, EvidenceParams(), ev.data(), nullptr, &wk);
+      forPixels(&wk, w, h, [&](size_t i) { conf[i] = tmp[i] ? ev[i] : 1.0f; });
+      confA = conf.data();
+    }
+    std::vector<Candidate> cands(1);
+    cands[0].name = "detail";
+    cands[0].alpha = da.data();
+    cands[0].confidence = confA;
+    cands.insert(cands.end(), focus->extra, focus->extra + focus->extraCount);
+    std::vector<float>& fz = ws.warped;
+    fz.resize(n);
+    fuseCandidates(cands.data(), int(cands.size()), w, h, focus->fusion, fz.data(), focus->rule, &wk);
+    da.swap(fz);
   }
 
   // 3. Connected detail: flood over zone pixels above kPresent from the anchors (anchors marked
@@ -279,7 +339,7 @@ void merge(const float* base, const float* detail, const float* picture, int w, 
 
   // 5. Evidence on the kept fine detail: unsupported thin structures are scaled down. A thick
   // area (the detail's body edge) is never judged: a smooth change has no structure to compare.
-  const bool useEv = p.evidence && picture;
+  const bool useEv = p.evidence && picture && !fused;  // fused: the evidence is candidate (a)'s confidence
   std::vector<float>& ev = ws.ev;
   if (useEv) {
     ev.resize(n);
@@ -359,9 +419,18 @@ void merge(const float* base, const float* detail, const float* picture, int w, 
     }
   });
 
+  // Focus Region: out = base + weight (merged - base), the ends exact; Matte edge never below the base.
+  auto mixRegion = [&](size_t i, float v) -> float {
+    if (!region || !zone[i]) return v;
+    const float wgt = rw[i];
+    if (wgt < 1.0f) v = base[i] + wgt * (v - base[i]);
+    return trimap ? v : std::max(v, base[i]);
+  };
+  if (region) forPixels(&wk, w, h, [&](size_t i) { out[i] = mixRegion(i, out[i]); });
+
   // Views.
   if (views.added) forPixels(&wk, w, h, [&](size_t i) { views.added[i] = out[i] - base[i]; });
-  if (views.zone) forPixels(&wk, w, h, [&](size_t i) { views.zone[i] = ramp[i]; });
+  if (views.zone) forPixels(&wk, w, h, [&](size_t i) { views.zone[i] = region ? rw[i] : ramp[i]; });
   if (views.rejected)
     forPixels(&wk, w, h, [&](size_t i) {
       float all = base[i];
@@ -376,7 +445,7 @@ void merge(const float* base, const float* detail, const float* picture, int w, 
           all = std::min(1.0f, std::max(0.0f, float(ref + wt * d)));
         }
       }
-      views.rejected[i] = std::fabs(all - out[i]);
+      views.rejected[i] = std::fabs(mixRegion(i, all) - out[i]);
     });
   if (views.residual) {
     std::vector<float>& ob = ws.warped;  // free again after the registration

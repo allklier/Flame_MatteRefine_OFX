@@ -20,7 +20,7 @@ VARIANTS (chosen when Flame loads the plugin, so each needs a Flame restart)
     probe_detail_kind=mask    Detail = an optional mask clip (Alpha/RGBA/RGB, as plugin 1's old Matte clip)
 
 SETUP (assistant builds; you do the sudo + restart)
-  1. sudo ln -s ~/MatteRefine_build/build_probe/MergeProbe.ofx.bundle /usr/OFX/Plugins/
+  1. sudo ln -s ~/ClaudeCode/MatteRefine_build/build_probe/MergeProbe.ofx.bundle /usr/OFX/Plugins/
   2. Add "probe_detail_kind=none" to ~/.config/matte-refine/config.conf. Restart Flame.
      The node is "Merge Probe" (group "Matte Refine").
   3. Log: ~/.cache/matte-refine/logs/matte-refine.log. Probe lines carry "node=probe" (load) or
