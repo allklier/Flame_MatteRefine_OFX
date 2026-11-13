@@ -1,0 +1,63 @@
+FLAME TEST FOR MATTE MERGE: THE FOCUS REGION SOCKET
+====================================================
+Written 2026-11-12. About 30 minutes. On the Linux Flame test machine. Nothing here has been seen in Flame
+yet: every item is a first look. Design: docs/focus_region.md.
+
+WHAT THIS TESTS
+  A fourth, optional input "Focus Region": a soft roto drawn by the artist. When it is connected it is the
+  ONLY place Matte Merge may change the base matte; outside it the output is the base matte, bit for bit.
+  Checked here: the new socket, the new "Focus Region" column, View Region, the footers, Snap to Picture,
+  and that nothing changes while the socket is empty.
+
+SETUP (assistant builds; you do the sudo + restart)
+  1. The assistant gives the bundle folder; link it as before:
+       sudo ln -s <build folder>/MatteMerge.ofx.bundle /usr/OFX/Plugins/   (replace the old link)
+     Restart Flame.
+  2. The node now has SIX columns on one tab:
+       Matte (View, Version) · Zone · Align · Combine ·
+       Focus Region (Region Grow % of height, Region Feather % of height, Snap to Picture, Snap Strength) ·
+       Support
+     Note if Flame lays it out differently (a second tab, an empty column, cut labels).
+  3. Debug Logging on (Support). Each render's DEBUG line now has "| region <state> (<n> px, grow ..,
+     feather .., snap ..)". Log: ~/.cache/matte-refine/logs/matte-refine.log
+
+FOOTAGE
+  P = the picture, B = a base matte, D = a detail matte (as in MERGE_TEST.txt)
+  R = a soft roto (Flame's GMask or a Roto node) around ONE part of the edge, e.g. the hair at the top
+      of the head; leave the rest of the edge outside it.
+
+CONNECT
+  P -> front (red), B -> first blue (source alpha), D -> "Detail", R -> "Focus Region".
+  Note: how many sockets show, their colours and order, and which one is "Focus Region". (Expected: a
+  third blue socket after Detail; not verified.)
+
+TESTS
+  1. Socket empty (R not connected), all defaults. The result must be exactly what Matte Merge gave
+     before this build. Compare with the old build's render if you still have one (or a saved frame):
+     a difference anywhere is a bug. The footer is the usual info line (no "Focus Region" part).
+  2. Connect R. Footer: the info line plus " Focus Region: <n> px.".
+     a. View Result Matte: detail is added inside R only. Outside R the matte must equal B exactly
+        (wipe against B, or a Difference / Comp in subtract: zero outside R).
+     b. View Region: the region as used (white = full effect, grey = partial, black = none).
+     c. View Zone: the same as Region while R is connected.
+     d. View Added: changes only inside R; no green (green = the base was lowered: should not happen).
+  3. Region Feather % of height: 0, 0.25, 1.0. The Region view softens inwards only: nothing appears
+     outside what you drew. Region Grow % of height: 0.5 and -0.5 (larger / smaller). Note whether the
+     corners look boxy at large Grow (it grows by a square).
+  4. Snap to Picture on, Snap Strength 1, then 0.5, then 0. Inside R the matte edge should tighten onto
+     the picture's edges; outside R nothing changes; the matte never gets thinner than B. Note speed
+     (UHD) and anything odd (rings, a seam at the region's border).
+  5. Disconnect D (keep R): footer "Focus Region connected, but no candidate: connect a detail matte to
+     the Detail input. The base matte passes through." Alpha = B. View Region still shows R.
+     Reconnect D: back to test 2.
+  6. Make R black everywhere (or move it off frame): footer "The Focus Region is black everywhere: the base
+     matte passes through." Alpha = B.
+  7. Disconnect R: back to exactly test 1 (same footer, same matte), whatever Grow / Feather / Snap say.
+  8. Source = Trimap with a trimap on the source alpha and R connected: the grey zone is filled only
+     inside R. Say whether that is what you expect, or whether the trimap should win.
+  9. Proxy / half resolution: R's effect should look the same at proxy (Grow and Feather are % of height).
+ 10. Batch Render a few frames with R animated (a moving roto): no errors, region follows.
+
+WHAT TO SEND BACK
+  Screenshots of the node (sockets and the six columns), the footers seen, the log lines for one render
+  with R connected (Collect Logs is fine), and any frame where something changed outside R.

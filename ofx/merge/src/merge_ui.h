@@ -11,8 +11,11 @@ namespace mr {
 namespace merge {
 
 // Choice options are stored as indexes in setups: append only (new options at the end).
-enum View { kViewResult = 0, kViewPicture = 1, kViewAdded = 2, kViewRejected = 3, kViewZone = 4, kViewResidual = 5 };
-extern const char* const kViewNames[6];
+enum View {
+  kViewResult = 0, kViewPicture = 1, kViewAdded = 2, kViewRejected = 3, kViewZone = 4, kViewResidual = 5,
+  kViewRegion = 6  // Focus Region: the prepared region weight (0 when the socket is not connected)
+};
+extern const char* const kViewNames[7];
 extern const char* const kSourceNames[2];    // Source: Matte edge / Trimap (merge::Source order)
 extern const char* const kAlignNames[2];     // Align: Auto / Off
 extern const char* const kMethodNames[2];    // Method: Add fine detail / Zone blend (merge::Method order)
@@ -30,7 +33,15 @@ struct UiValues {
   double strength = 1.0;
   double featherPct = 0.25;     // % of the frame height
   int evidence = 0;             // kEvidenceNames: 0 Off, 1 On
+  // Focus Region (docs/focus_region.md): used only while the Focus Region socket is connected.
+  double regionGrowPct = 0.0;      // % of the frame height; < 0 shrinks
+  double regionFeatherPct = 0.25;  // % of the frame height, inward
+  bool snap = false;               // Snap to Picture inside the region
+  double snapStrength = 1.0;       // 0-1
 };
+
+// Region Grow / Feather in px for a frame h px high (pct / 100 * h), as toMergeParams' sizes.
+double regionPx(double pct, int h);
 
 // The defaults of UiValues are the core's (HeightSizes, MergeParams); test_merge_ui checks that.
 // h: the height of the images as delivered (already at render scale, so a proxy keeps the same
@@ -42,6 +53,11 @@ int clampView(int view);
 
 // Footers (one sentence each, plain language).
 extern const char* const kNoDetailFooter;
+// Focus Region connected, Detail not: no candidate yet (the internal thin-line candidate is not built),
+// so the base passes through.
+extern const char* const kRegionNoDetailFooter;
+extern const char* const kRegionEmptyFooter;  // the region is black everywhere: the base passes through
+std::string regionSizeMismatchFooter(int rw, int rh, int w, int h);
 std::string constantBaseFooter(float value);
 std::string noAlphaFooter();
 std::string sizeMismatchFooter(int dw, int dh, int w, int h);
@@ -50,6 +66,8 @@ std::string failedFooter(const std::string& what);
 // kept / dropped in the zone, e.g. "Align: picture: move + scale, +-0.12 px. Detail: 12.3k px kept,
 // 1.2k dropped."
 std::string infoFooter(const MergeInfo& info);
+// With a Focus Region: infoFooter + " Focus Region: <n> px." (n = pixels with weight > 0).
+std::string regionInfoFooter(const MergeInfo& info, long regionPixels);
 // 1234 -> "1234", 12345 -> "12.3k", 1234567 -> "1.23M".
 std::string shortCount(long n);
 

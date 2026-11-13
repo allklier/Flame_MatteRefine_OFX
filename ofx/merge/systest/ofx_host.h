@@ -177,11 +177,13 @@ class Instance {
 
 class Host {
  public:
-  explicit Host(const std::string& binaryPath);
+  // pluginIndex: which of the binary's plugins (OfxGetPlugin(n)) this host drives; 0 = the first.
+  explicit Host(const std::string& binaryPath, int pluginIndex = 0);
   ~Host();
   bool loaded() const { return plugin_ != nullptr; }
   const std::string& loadError() const { return error_; }
   OfxPlugin* plugin() { return plugin_; }
+  int pluginCount() const { return count_; }  // OfxGetNumberOfPlugins()
 
   // load + describe + describeInContext(Filter). Returns the status of the first failure.
   OfxStatus describe();
@@ -197,6 +199,7 @@ class Host {
  private:
   void* lib_ = nullptr;
   OfxPlugin* plugin_ = nullptr;
+  int count_ = 0;
   std::string error_;
   Effect descriptor_;
   std::thread::id main_;

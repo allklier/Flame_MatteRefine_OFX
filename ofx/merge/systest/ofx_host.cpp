@@ -538,7 +538,7 @@ std::string PropSet::getStr(const char* n, int idx) const {
 
 // --- Host ---
 
-Host::Host(const std::string& binaryPath) : main_(std::this_thread::get_id()) {
+Host::Host(const std::string& binaryPath, int pluginIndex) : main_(std::this_thread::get_id()) {
   gHost = this;
   PropSet& h = hostProps;
   h.setStr(kOfxPropName, "com.janklier.matterefine.systest");
@@ -583,11 +583,12 @@ Host::Host(const std::string& binaryPath) : main_(std::this_thread::get_id()) {
   }
   auto count = reinterpret_cast<int (*)()>(dlsym(lib_, "OfxGetNumberOfPlugins"));
   auto get = reinterpret_cast<OfxPlugin* (*)(int)>(dlsym(lib_, "OfxGetPlugin"));
-  if (!count || !get || count() < 1) {
-    error_ = "OFX entry points missing or no plugin";
+  count_ = count ? count() : 0;
+  if (!count || !get || pluginIndex < 0 || pluginIndex >= count_) {
+    error_ = "OFX entry points missing or no plugin " + std::to_string(pluginIndex);
     return;
   }
-  plugin_ = get(0);
+  plugin_ = get(pluginIndex);
   plugin_->setHost(&ofxHost);
 }
 

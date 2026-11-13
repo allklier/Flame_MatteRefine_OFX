@@ -1,7 +1,7 @@
 # Matte Merge (ofx/merge/CLAUDE.md, decision 37): only with -DMR_BUILD_MERGE=ON. The classical core
 # (pure C++14, no OFX), its synthetic scenes and tests, then the plugin (MatteMerge.ofx.bundle).
 add_library(mr_merge_core STATIC src/matte_merge.cpp src/merge_register.cpp src/merge_picreg.cpp src/merge_evidence.cpp
-  src/merge_morph.cpp)
+  src/merge_morph.cpp src/merge_fusion.cpp)
 target_include_directories(mr_merge_core PUBLIC src)
 target_link_libraries(mr_merge_core PUBLIC mr_ops)
 target_compile_options(mr_merge_core PRIVATE -Wall -Wextra -fvisibility=hidden)
@@ -21,6 +21,11 @@ add_test(NAME merge_scenes COMMAND test_merge_scenes)
 add_executable(test_merge_align tests/test_merge_align.cpp)
 target_link_libraries(test_merge_align PRIVATE mr_merge_core mr_merge_synth)
 add_test(NAME merge_align COMMAND test_merge_align)
+# Focus Region and candidate fusion (merge_fusion.h, docs/focus_region.md).
+add_executable(test_merge_fusion tests/test_merge_fusion.cpp)
+target_link_libraries(test_merge_fusion PRIVATE mr_merge_core mr_merge_synth)
+add_test(NAME merge_fusion COMMAND test_merge_fusion)
+set_tests_properties(merge_fusion PROPERTIES LABELS smoke)
 
 # The plugin (decision 37, as MatteRefineML, decision 27): bundle MatteMerge.ofx.bundle, its own
 # version, linked like Matte Refine (C++14, only the two OFX entry points, libstdc++ dynamic).

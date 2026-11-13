@@ -3,7 +3,9 @@
 // (decision 14), the classical core runs inline.
 // Inputs (probe in Flame 2027.x, ofx/merge/CLAUDE.md "Probe result"): a filter; Source = the picture
 // on the front with the base matte / trimap in its alpha (Flame's source alpha socket, decisions 4
-// and 35); one optional mask clip "Detail" (arrives Alpha-only). Output: alpha = the combined matte,
+// and 35); one optional mask clip "Detail" (arrives Alpha-only); one optional mask clip "FocusRegion"
+// (docs/focus_region.md: when connected, its soft weight replaces the automatic zone and is the only
+// place the matte may change; unconnected = the behaviour without it, bit for bit). Output: alpha = the combined matte,
 // RGB per View (decision 11). Colour: no conversion requested (the core is encoding-invariant);
 // output tags as decision 23 (outputColourspaceAnswer, merge_ui.h). Any failure is a footer and the
 // base matte passing through; never an empty frame.
@@ -29,6 +31,7 @@
 #include "env_info.h"
 #include "log.h"
 #include "matte_merge.h"
+#include "merge_fusion.h"
 #include "merge_ui.h"
 #include "ocio_encoding.h"
 #include "ofxColour.h"
@@ -56,6 +59,7 @@ namespace mm = mr::merge;
 constexpr const char* kPluginId = "com.janklier.mattemerge";
 constexpr const char* kPluginLabel = "Matte Merge";
 constexpr const char* kDetailClip = "Detail";
+constexpr const char* kRegionClip = "FocusRegion";  // stored in setups: never rename
 
 // Param ids: stored in setups, append only.
 constexpr const char* kPView = "view";
@@ -72,6 +76,10 @@ constexpr const char* kPDebugLog = "debugLog";
 constexpr const char* kPCollectLogs = "collectLogs";
 constexpr const char* kPNodeId = "nodeId";
 constexpr const char* kPBridge = "zoneBridge";
+constexpr const char* kPRegionGrow = "regionGrow";
+constexpr const char* kPRegionFeather = "regionFeather";
+constexpr const char* kPSnap = "regionSnap";
+constexpr const char* kPSnapStrength = "regionSnapStrength";
 
 std::string homeDir() {
   const char* h = std::getenv("HOME");
@@ -149,6 +157,7 @@ class MatteMergeEffect : public OFX::ImageEffect {
   explicit MatteMergeEffect(OfxImageEffectHandle handle) : ImageEffect(handle) {
     src_ = fetchClip(kOfxImageEffectSimpleSourceClipName);
     detail_ = fetchClip(kDetailClip);
+    region_ = fetchClip(kRegionClip);
     dst_ = fetchClip(kOfxImageEffectOutputClipName);
     view_ = fetchChoiceParam(kPView);
     source_ = fetchChoiceParam(kPSource);
@@ -162,6 +171,10 @@ class MatteMergeEffect : public OFX::ImageEffect {
     feather_ = fetchDoubleParam(kPFeather);
     evidence_ = fetchChoiceParam(kPEvidence);
     debugLog_ = fetchBooleanParam(kPDebugLog);
+    regionGrow_ = fetchDoubleParam(kPRegionGrow);
+    regionFeather_ = fetchDoubleParam(kPRegionFeather);
+    snap_ = fetchBooleanParam(kPSnap);
+    snapStrength_ = fetchDoubleParam(kPSnapStrength);
     OFX::StringParam* nodeIdParam = fetchStringParam(kPNodeId);
     try {
       nodeIdParam->getValue(nodeId_);
@@ -233,6 +246,10 @@ class MatteMergeEffect : public OFX::ImageEffect {
     ui.strength = strength_->getValueAtTime(args.time);
     ui.featherPct = feather_->getValueAtTime(args.time);
     evidence_->getValueAtTime(args.time, ui.evidence);
+    ui.regionGrowPct = regionGrow_->getValueAtTime(args.time);
+    ui.regionFeatherPct = regionFeather_->getValueAtTime(args.time);
+    snap_->getValueAtTime(args.time, ui.snap);
+    ui.snapStrength = snapStrength_->getValueAtTime(args.time);
 
     // The picture with the base matte in its alpha (mandatory in a filter: Flame always connects it).
     std::string warning;  // a footer that means the merge did not run (the base passes through)
@@ -256,6 +273,7 @@ class MatteMergeEffect : public OFX::ImageEffect {
     }
 
     // The detail matte (mask clip: Alpha-only in Flame).
+    const bool baseOk = warning.empty();
     std::string detailLog = "not connected";
     bool haveDetail = false;
     if (warning.empty()) {
@@ -292,6 +310,53 @@ class MatteMergeEffect : public OFX::ImageEffect {
         }
       }
     }
+    // The Focus Region (mask clip, optional; docs/focus_region.md): its prepared weight replaces the
+    // zone. Detail missing -> no candidate yet: the base passes through with its own footer.
+    std::string regionLog = "not connected";
+    bool haveRegion = false;
+    long regionPixels = 0;
+    if (baseOk && region_->isConnected()) {
+      std::unique_ptr<OFX::Image> ri;
+      std::string regionError;
+      try {
+        ri.reset(region_->fetchImage(args.time));
+      } catch (const std::exception& e) {
+        regionLog = std::string("fetch failed: ") + e.what();
+      }
+      if (!ri) {
+        if (regionLog == "not connected") regionLog = "no image";
+        regionError = mm::failedFooter("no Focus Region image from the host");
+      } else if (ri->getPixelDepth() != OFX::eBitDepthFloat) {
+        regionLog = "not float";
+        regionError = mm::failedFooter("the Focus Region is not 32-bit float");
+      } else {
+        const OfxRectI rb = ri->getBounds();
+        char b[96];
+        std::snprintf(b, sizeof b, "%dch %d,%d-%d,%d", componentCount(ri->getPixelComponents()), rb.x1, rb.y1, rb.x2,
+                      rb.y2);
+        regionLog = b;
+        if (rb.x1 != sb.x1 || rb.y1 != sb.y1 || rb.x2 != sb.x2 || rb.y2 != sb.y2) {
+          regionError = mm::regionSizeMismatchFooter(rb.x2 - rb.x1, rb.y2 - rb.y1, w, h);
+        } else {
+          extractMatte(*ri, true, regionM_);
+          regionW_.resize(regionM_.size());
+          mm::prepareRegion(regionM_.data(), w, h, mm::regionPx(ui.regionGrowPct, h),
+                            mm::regionPx(ui.regionFeatherPct, h), regionW_.data());
+          regionPixels = long(std::count_if(regionW_.begin(), regionW_.end(), [](float v) { return v > 0.0f; }));
+          haveRegion = true;
+        }
+      }
+      if (!regionError.empty()) {
+        warning = regionError;
+        error = true;
+        haveDetail = false;
+      } else if (warning == mm::kNoDetailFooter) {
+        warning = mm::kRegionNoDetailFooter;
+      } else if (warning.empty() && regionPixels == 0) {
+        warning = mm::kRegionEmptyFooter;
+        haveDetail = false;
+      }
+    }
     const double readMs = msSince(t0);
 
     // The merge (or the base passing through).
@@ -312,7 +377,16 @@ class MatteMergeEffect : public OFX::ImageEffect {
         if (view == mm::kViewRejected) mv.rejected = vb;
         if (view == mm::kViewZone) mv.zone = vb;
         if (view == mm::kViewResidual) mv.residual = vb;
-        mm::merge(base_.data(), detailM_.data(), rgb_.data(), w, h, p, result_.data(), mv, &info, &ws_);
+        mm::FocusInput focus;
+        focus.weight = haveRegion ? regionW_.data() : nullptr;
+        mm::merge(base_.data(), detailM_.data(), rgb_.data(), w, h, p, result_.data(), mv, &info, &ws_,
+                  haveRegion ? &focus : nullptr);
+        if (haveRegion && ui.snap) {  // Snap to Picture, inside the region only (merge_fusion.h)
+          mm::snapInRegion(base_.data(), result_.data(), rgb_.data(), regionW_.data(), w, h, ui.snapStrength,
+                           mm::snapParamsForHeight(h), p.source != mm::Source::Trimap);
+          if (view == mm::kViewAdded)
+            for (size_t i = 0; i < result_.size(); ++i) viewBuf_[i] = result_[i] - base_[i];
+        }
         merged = true;
       } catch (const std::exception& e) {
         warning = mm::failedFooter(e.what());
@@ -322,6 +396,7 @@ class MatteMergeEffect : public OFX::ImageEffect {
       }
       mergeMs = msSince(tm);
     }
+    if (view == mm::kViewRegion && haveRegion) viewBuf_ = regionW_;  // QC: the prepared region (else black)
     const std::vector<float>& alpha = merged ? result_ : base_;
 
     // Output (decision 11): alpha = the combined matte, RGB per View, inside the render window.
@@ -365,7 +440,10 @@ class MatteMergeEffect : public OFX::ImageEffect {
     const double writeMs = msSince(tw);
 
     // Footer: a warning / error every render (as Matte Refine ML); the info line only when it changes.
-    std::string footer = warning.empty() ? (merged ? mm::infoFooter(info) : std::string()) : warning;
+    std::string footer = warning.empty()
+                             ? (merged ? (haveRegion ? mm::regionInfoFooter(info, regionPixels) : mm::infoFooter(info))
+                                       : std::string())
+                             : warning;
     try {
       if (footer.empty()) {
         if (!lastFooter_.empty()) clearPersistentMessage();
@@ -383,13 +461,15 @@ class MatteMergeEffect : public OFX::ImageEffect {
     const mm::AlignInfo& ai = info.align;
     LOGD("render t=%g %dx%d scale=%g window=%d,%d-%d,%d view=%s | source=%s reach=%.3g%% (%.1f px) keep=%d bridge=%.3g%% (%.2f px) "
          "align=%s method=%s width=%.3g%% (%.2f px) strength=%.3g feather=%.3g%% (%.2f px) evidence=%s | detail %s "
+         "| region %s (%ld px, grow %.3g%%, feather %.3g%%, snap %d %.2f) "
          "| %s: model '%s' uncertainty %.3f px agreement %.2f blocks %d/%d move %.2f,%.2f scale %.5f | zone %ld "
          "kept %ld dropped %ld | read %.1f merge %.1f write %.1f render %.1f ms%s%s",
          args.time, w, h, args.renderScale.x, win.x1, win.y1, win.x2, win.y2, mm::kViewNames[view],
          mm::kSourceNames[p.source == mm::Source::Trimap], ui.reachPct, p.reachPx, int(p.keepDisconnected), ui.bridgePct, p.bridgePx,
          mm::kAlignNames[!p.align], mm::kMethodNames[p.method == mm::Method::ZoneBlend], ui.detailWidthPct,
          p.detailWidthPx, p.strength, ui.featherPct, p.featherPx, mm::kEvidenceNames[p.evidence],
-         detailLog.c_str(), merged ? "merged" : "passed through", mm::alignModelName(ai.model), ai.uncertaintyPx,
+         detailLog.c_str(), regionLog.c_str(), regionPixels, ui.regionGrowPct, ui.regionFeatherPct, int(ui.snap),
+         ui.snapStrength, merged ? "merged" : "passed through", mm::alignModelName(ai.model), ai.uncertaintyPx,
          ai.agreement, ai.inliers, ai.blocks, info.reg.tx, info.reg.ty, info.reg.scale, info.zonePixels,
          info.keptPixels, info.droppedPixels, readMs, mergeMs, writeMs, msSince(t0), warning.empty() ? "" : " | ",
          warning.c_str());
@@ -453,10 +533,10 @@ class MatteMergeEffect : public OFX::ImageEffect {
                    : "Could not write the support bundle: " + err);
   }
 
-  OFX::Clip *src_, *detail_, *dst_;
+  OFX::Clip *src_, *detail_, *region_, *dst_;
   OFX::ChoiceParam *view_, *source_, *align_, *method_, *evidence_;
-  OFX::BooleanParam *keepDisc_, *debugLog_;
-  OFX::DoubleParam *reach_, *bridge_, *detailWidth_, *strength_, *feather_;
+  OFX::BooleanParam *keepDisc_, *debugLog_, *snap_;
+  OFX::DoubleParam *reach_, *bridge_, *detailWidth_, *strength_, *feather_, *regionGrow_, *regionFeather_, *snapStrength_;
   std::string nodeId_, logNode_;
   bool inChangedParam_ = false;
   bool matteChecked_ = false, hasMatte_ = false;
@@ -464,7 +544,7 @@ class MatteMergeEffect : public OFX::ImageEffect {
   std::string lastOutputCs_;
   bool outputLogged_ = false;
   std::string lastFooter_;  // the footer last shown ("" = none)
-  std::vector<float> base_, detailM_, rgb_, result_, viewBuf_;  // reused across renders
+  std::vector<float> base_, detailM_, rgb_, result_, viewBuf_, regionM_, regionW_;  // reused across renders
   mm::MergeWorkspace ws_;                                         // one per instance (matte_merge.h)
 };
 
@@ -549,14 +629,24 @@ class MatteMergeFactory : public OFX::PluginFactoryHelper<MatteMergeFactory> {
     d->setOptional(true);
     d->setSupportsTiles(false);
     d->setLabels("Detail", "Detail", "Detail");
+    // Focus Region (docs/focus_region.md): declared as Detail, after it (Detail stays the second blue
+    // socket, as the probe showed; the Region's socket position in Flame: UNVERIFIED).
+    OFX::ClipDescriptor* rg = desc.defineClip(kRegionClip);
+    rg->addSupportedComponent(OFX::ePixelComponentAlpha);
+    rg->addSupportedComponent(OFX::ePixelComponentRGBA);
+    rg->addSupportedComponent(OFX::ePixelComponentRGB);
+    rg->setIsMask(true);
+    rg->setOptional(true);
+    rg->setSupportsTiles(false);
+    rg->setLabels("Focus Region", "Focus Region", "Focus Region");
     OFX::ClipDescriptor* dst = desc.defineClip(kOfxImageEffectOutputClipName);
     dst->addSupportedComponent(OFX::ePixelComponentRGBA);
     dst->addSupportedComponent(OFX::ePixelComponentAlpha);
     dst->setSupportsTiles(false);
 
     // Flame: one group = one column of <= 5 rows (choice 2, others 1; a hidden param takes a slot
-    // too), 6 columns per tab. Columns: Matte (3) · Zone (5) · Align (2) · Combine (5) · Support (5):
-    // one tab.
+    // too), 6 columns per tab. Columns: Matte (3) · Zone (5) · Align (2) · Combine (5) · Focus Region (4)
+    // · Support (5): one tab, all six columns used.
     OFX::PageParamDescriptor* page = desc.definePageParam("Matte Merge");
     auto group = [&](const char* name, const char* text) {
       auto* g = desc.defineGroupParam(name);
@@ -592,8 +682,9 @@ class MatteMergeFactory : public OFX::PluginFactoryHelper<MatteMergeFactory> {
                         "Matte: the combined matte. Picture: the front input. Added: what the detail matte added "
                         "(white; green where Zone Blend lowered the base). Rejected: detail that was dropped "
                         "(not connected to the subject, or no support in the picture). Zone: where the detail may "
-                        "act. Residual: how far the aligned detail's body still differs from the base.",
-                        mm::kViewNames, 6, mm::kViewResult, gMatte);
+                        "act. Residual: how far the aligned detail's body still differs from the base. Region: the Focus "
+                        "Region as used (after Grow and Feather).",
+                        mm::kViewNames, 7, mm::kViewResult, gMatte);
     view->setAnimates(false);
     auto* version = labelled(desc.defineStringParam("version"), "Version", "");
     version->setStringType(OFX::eStringTypeLabel);
@@ -644,6 +735,23 @@ class MatteMergeFactory : public OFX::PluginFactoryHelper<MatteMergeFactory> {
     number(kPFeather, "Feather % of height",
            "Soft transition at the zone's border, as a percentage of the frame height. 0 = hard.", def.featherPct,
            0.0, 2.0, 2, 0.05, gCombine);
+
+    auto* gRegion = group("grpRegion", "Focus Region");
+    number(kPRegionGrow, "Region Grow % of height",
+           "Focus Region socket connected: grow (or, below 0, shrink) the region, as a percentage of the frame "
+           "height.",
+           def.regionGrowPct, -2.0, 2.0, 2, 0.05, gRegion);
+    number(kPRegionFeather, "Region Feather % of height",
+           "Focus Region: soften the region's border inwards (never beyond what you drew), as a percentage of "
+           "the frame height. 0 = as drawn.",
+           def.regionFeatherPct, 0.0, 2.0, 2, 0.05, gRegion);
+    auto* snap = labelled(desc.defineBooleanParam(kPSnap), "Snap to Picture",
+                          "Focus Region: after the merge, pull the matte onto the picture's edges inside the region "
+                          "(Matte Refine's Snap to Image); never lowers the base matte. Needs the Focus Region.");
+    snap->setDefault(def.snap);
+    snap->setParent(*gRegion);
+    number(kPSnapStrength, "Snap Strength", "How much of the snap is taken: 0 = none, 1 = all.", def.snapStrength,
+           0.0, 1.0, 2, 0.05, gRegion);
 
     auto* gSupport = group("grpSupport", "Support");
     choice(kPEvidence, "Picture Evidence",

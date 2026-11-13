@@ -44,6 +44,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "merge_fusion.h"
 #include "merge_register.h"
 
 namespace mr {
@@ -129,18 +130,41 @@ struct MergeInfo {
 // sized scratch is reused instead of allocated and page-faulted on every render. Grows to the
 // largest frame seen; contents are not meaningful between calls.
 struct MergeWorkspace {
-  std::vector<uint8_t> zone, mask, kept;
+  std::vector<uint8_t> zone, mask, kept, alignZone;
   std::vector<float> d2, d2b, ramp, prior, da, warped, opened, fine, ev, sig, morph, bridge;
   std::vector<int> stack;
+  std::vector<float> region, conf;  // Focus Region: the clamped weight; candidate (a)'s confidence
+};
+
+// Focus Region (merge_fusion.h, docs/focus_region.md), optional: merge(..., focus = nullptr) is the
+// code path before it, bit for bit. With a FocusInput:
+// - the zone is where weight > 0 (it replaces Matte edge's Reach zone and Trimap's unknown band; the
+//   feather ramp is not used: the weight is the ramp, prepareRegion feathers it); the alignment still
+//   uses the automatic zone (the move is global; a small region alone has too little detail);
+// - the result inside is blended with the weight: out = base + weight (merged - base) (weight 0: the
+//   base, weight 1: merged, bit for bit), and with Source Matte edge never below the base (a Zone
+//   Blend may raise only); Trimap keeps its fill (a trimap's grey is meant to change);
+// - extra candidates (extraCount > 0): after alignment the Detail matte becomes candidate (a), its
+//   confidence the picture evidence on its thin structures (Evidence On; else 1), and the candidates
+//   are fused (fuseCandidates); the fused map replaces the aligned detail for the steps after
+//   (connectivity, thin structures, Bridge and its strand mask). Evidence is then not applied again.
+//   extraCount 0: the Detail matte alone, exactly the steps without a region.
+// Views: zone = the weight; added / rejected after the weight.
+struct FocusInput {
+  const float* weight = nullptr;      // w*h, 0-1 (prepareRegion); NaN / outside 0-1 clamped
+  const Candidate* extra = nullptr;   // candidates besides the Detail matte, in the picture's grid
+  int extraCount = 0;                 // 0 now: slot (b) (thin lines) is empty
+  FusionParams fusion;
+  FusionRule rule = defaultFusionRule;
 };
 
 // base, detail: w*h mattes; picture: w*h*3 RGB, required by the plugin (registration and
 // evidence use it; nullptr only in tests: registration then on the mattes alone, evidence off).
 // out: w*h, may not alias the inputs. ws: optional reusable buffers. Threads: one mr::Workers pool
-// for the call.
+// for the call. focus: the Focus Region (above); nullptr = none.
 void merge(const float* base, const float* detail, const float* picture, int w, int h, const MergeParams& p,
            float* out, const MergeViews& views = MergeViews(), MergeInfo* info = nullptr,
-           MergeWorkspace* ws = nullptr);
+           MergeWorkspace* ws = nullptr, const FocusInput* focus = nullptr);
 
 }  // namespace merge
 }  // namespace mr

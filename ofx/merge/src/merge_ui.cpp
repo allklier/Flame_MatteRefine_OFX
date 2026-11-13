@@ -7,13 +7,19 @@
 namespace mr {
 namespace merge {
 
-const char* const kViewNames[6] = {"Result Matte", "Picture", "Added", "Rejected", "Zone", "Residual"};
+const char* const kViewNames[7] = {"Result Matte", "Picture", "Added", "Rejected", "Zone", "Residual", "Region"};
 const char* const kSourceNames[2] = {"Matte Edge", "Trimap"};
 const char* const kAlignNames[2] = {"Auto", "Off"};
 const char* const kMethodNames[2] = {"Add Fine Detail", "Zone Blend"};
 const char* const kEvidenceNames[2] = {"Off", "On"};
 
 const char* const kNoDetailFooter = "Connect the detail matte to the Detail input.";
+const char* const kRegionNoDetailFooter =
+    "Focus Region connected, but no candidate: connect a detail matte to the Detail input. The base matte "
+    "passes through.";
+const char* const kRegionEmptyFooter = "The Focus Region is black everywhere: the base matte passes through.";
+
+double regionPx(double pct, int h) { return pct / 100.0 * h; }
 
 MergeParams toMergeParams(const UiValues& v, int h) {
   MergeParams p;
@@ -32,7 +38,7 @@ MergeParams toMergeParams(const UiValues& v, int h) {
   return p;
 }
 
-int clampView(int view) { return view >= kViewResult && view <= kViewResidual ? view : kViewResult; }
+int clampView(int view) { return view >= kViewResult && view <= kViewRegion ? view : kViewResult; }
 
 std::string constantBaseFooter(float value) {
   char b[200];
@@ -50,6 +56,13 @@ std::string noAlphaFooter() {
 std::string sizeMismatchFooter(int dw, int dh, int w, int h) {
   char b[200];
   std::snprintf(b, sizeof b, "The detail matte is %dx%d, the picture %dx%d: the base matte passes through.", dw, dh,
+                w, h);
+  return b;
+}
+
+std::string regionSizeMismatchFooter(int rw, int rh, int w, int h) {
+  char b[200];
+  std::snprintf(b, sizeof b, "The Focus Region is %dx%d, the picture %dx%d: the base matte passes through.", rw, rh,
                 w, h);
   return b;
 }
@@ -80,6 +93,10 @@ std::string infoFooter(const MergeInfo& info) {
   }
   return a + ". Detail: " + shortCount(info.keptPixels) + " px kept, " + shortCount(info.droppedPixels) +
          " dropped.";
+}
+
+std::string regionInfoFooter(const MergeInfo& info, long regionPixels) {
+  return infoFooter(info) + " Focus Region: " + shortCount(regionPixels) + " px.";
 }
 
 std::string outputColourspaceAnswer(bool viewPicture, bool sourceConnected, const std::string& style,
