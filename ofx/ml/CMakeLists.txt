@@ -35,7 +35,7 @@ target_link_libraries(mr_ml_ort PUBLIC mr_ml_core mr_ml_support ${ORT_LIB} ${CMA
 target_compile_options(mr_ml_ort PRIVATE -Wall -Wextra -fvisibility=hidden)
 set_target_properties(mr_ml_ort PROPERTIES CXX_STANDARD 17)
 
-set(MRML_VERSION "0.1.0")
+set(MRML_VERSION "0.2.0")
 string(REPLACE "." ";" MRML_VERSION_PARTS "${MRML_VERSION}")
 list(GET MRML_VERSION_PARTS 0 MRML_VERSION_MAJOR)
 list(GET MRML_VERSION_PARTS 1 MRML_VERSION_MINOR)
@@ -61,27 +61,36 @@ target_compile_options(mr_ml_server PRIVATE -Wall -Wextra -fvisibility=hidden)
 # the runner needs are copied into Contents/Resources/lib and the RUNPATH is $ORIGIN/lib only, so
 # the bundle works wherever it is installed. The CUDA libraries come from the config's
 # ml_cuda_libs (runner_main.cpp; packaging/setup.sh installs them).
+# mrml_runner(<target> <bundle dir> [<build id>]): the runner built into <bundle dir>/Contents/Resources/mr_ml_runner.
+# A build id other than plugin 2's (MRML_BUILD_ID) gives another plugin its own runner (Edge Recipes,
+# docs/edge_recipes.md 1.3; runner_main.cpp buildId()).
 option(MRML_BUNDLE_ORT "Release layout: ONNX Runtime inside the ML bundle, runner RUNPATH $ORIGIN/lib only" OFF)
-add_executable(mr_ml_runner src/runner_main.cpp)
-target_include_directories(mr_ml_runner PRIVATE ${ORT_DIR}/include)
-target_link_libraries(mr_ml_runner PRIVATE mr_ml_server mr_ml_ort ${CMAKE_DL_LIBS})
-target_compile_options(mr_ml_runner PRIVATE -Wall -Wextra)
-set_target_properties(mr_ml_runner PROPERTIES CXX_STANDARD 17
-  RUNTIME_OUTPUT_DIRECTORY ${MRML_BUNDLE_DIR}/Contents/Resources
-  BUILD_RPATH "${ORT_DIR}/lib;\$ORIGIN/lib" INSTALL_RPATH "\$ORIGIN/lib")
-if(MRML_BUNDLE_ORT)
-  # The install RPATH at build time: without it CMake adds ORT_DIR/lib (a linked library's folder).
-  set_target_properties(mr_ml_runner PROPERTIES BUILD_WITH_INSTALL_RPATH ON)
-  # libonnxruntime.so.1 (the runner's NEEDED) with its versioned file, the provider bridge and the
-  # CUDA provider (ORT loads both from its own folder). Not the TensorRT provider.
-  file(GLOB MRML_ORT_LIBS ${ORT_DIR}/lib/libonnxruntime.so*)
-  list(APPEND MRML_ORT_LIBS ${ORT_DIR}/lib/libonnxruntime_providers_shared.so
-    ${ORT_DIR}/lib/libonnxruntime_providers_cuda.so)
-  add_custom_command(TARGET mr_ml_runner POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${MRML_BUNDLE_DIR}/Contents/Resources/lib
-    COMMAND cp -P ${MRML_ORT_LIBS} ${MRML_BUNDLE_DIR}/Contents/Resources/lib/
-    VERBATIM)
-endif()
+function(mrml_runner name bundle_dir)
+  add_executable(${name} ${CMAKE_SOURCE_DIR}/ofx/ml/src/runner_main.cpp)
+  target_include_directories(${name} PRIVATE ${ORT_DIR}/include)
+  target_link_libraries(${name} PRIVATE mr_ml_server mr_ml_ort ${CMAKE_DL_LIBS})
+  target_compile_options(${name} PRIVATE -Wall -Wextra)
+  if(ARGC GREATER 2)
+    target_compile_definitions(${name} PRIVATE MRML_RUNNER_BUILD_ID="${ARGV2}")
+  endif()
+  set_target_properties(${name} PROPERTIES CXX_STANDARD 17 OUTPUT_NAME mr_ml_runner
+    RUNTIME_OUTPUT_DIRECTORY ${bundle_dir}/Contents/Resources
+    BUILD_RPATH "${ORT_DIR}/lib;\$ORIGIN/lib" INSTALL_RPATH "\$ORIGIN/lib")
+  if(MRML_BUNDLE_ORT)
+    # The install RPATH at build time: without it CMake adds ORT_DIR/lib (a linked library's folder).
+    set_target_properties(${name} PROPERTIES BUILD_WITH_INSTALL_RPATH ON)
+    # libonnxruntime.so.1 (the runner's NEEDED) with its versioned file, the provider bridge and the
+    # CUDA provider (ORT loads both from its own folder). Not the TensorRT provider.
+    file(GLOB ort_libs ${ORT_DIR}/lib/libonnxruntime.so*)
+    list(APPEND ort_libs ${ORT_DIR}/lib/libonnxruntime_providers_shared.so
+      ${ORT_DIR}/lib/libonnxruntime_providers_cuda.so)
+    add_custom_command(TARGET ${name} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E make_directory ${bundle_dir}/Contents/Resources/lib
+      COMMAND cp -P ${ort_libs} ${bundle_dir}/Contents/Resources/lib/
+      VERBATIM)
+  endif()
+endfunction()
+mrml_runner(mr_ml_runner ${MRML_BUNDLE_DIR})
 
 # The plugin (decision 27): bundle MatteRefineML.ofx.bundle, its own version. No ONNX Runtime and
 # no CUDA in it (decision 32; test ml_bundle_deps): tiles go to mr_ml_runner.
@@ -183,10 +192,31 @@ add_test(NAME ml_temporal COMMAND test_temporal)
 add_executable(mr_temporal_eval tests/temporal_eval.cpp)
 target_link_libraries(mr_temporal_eval PRIVATE mr_ml_temporal mr_ops mr_synth_lib)
 
-# Render chain (matte -> Temporal -> Smart Fill -> Edge Refine) without OFX; the plugin links it.
+# Jump Repair without OFX: short hallucinated jumps against the neighbour mattes (C++14, no ORT).
+add_library(mr_ml_jump STATIC src/jump_repair.cpp)
+target_include_directories(mr_ml_jump PUBLIC src)
+target_link_libraries(mr_ml_jump PUBLIC mr_ops)
+target_compile_options(mr_ml_jump PRIVATE -Wall -Wextra -fvisibility=hidden)
+add_executable(test_jump_repair tests/test_jump_repair.cpp)
+target_link_libraries(test_jump_repair PRIVATE mr_ml_jump mr_ops mr_synth_lib)
+add_test(NAME ml_jump_repair COMMAND test_jump_repair)
+# Numbers on a real matte sequence (a .npy of alpha; not a test: ofx/ml/tests/jump_eval.cpp).
+add_executable(mr_jump_eval tests/jump_eval.cpp)
+target_link_libraries(mr_jump_eval PRIVATE mr_ml_jump mr_ops)
+# System test: MatteRefineML.ofx in the Flame-like host of Matte Merge (ofx/merge/systest/ofx_host.*):
+# params, layout, Jump Repair rendered through the host (no model step).
+add_executable(ml_systest tests/ml_systest.cpp ${CMAKE_SOURCE_DIR}/ofx/merge/systest/ofx_host.cpp)
+target_include_directories(ml_systest PRIVATE ${CMAKE_SOURCE_DIR}/ofx/merge/systest ${OFX_DIR}/include)
+target_link_libraries(ml_systest PRIVATE mr_ml_jump mr_ops mr_synth_lib ${CMAKE_DL_LIBS} Threads::Threads)
+add_dependencies(ml_systest MatteRefineML)
+add_test(NAME ml_systest COMMAND ml_systest ${MRML_BUNDLE_DIR}/Contents/${MR_ARCH_DIR}/MatteRefineML.ofx
+  ${CMAKE_BINARY_DIR}/ml_systest_home)
+set_tests_properties(ml_systest PROPERTIES TIMEOUT 300)
+
+# Render chain (matte -> Jump Repair -> Temporal -> Smart Fill -> Edge Refine) without OFX; the plugin links it.
 add_library(mr_ml_chain STATIC src/render_chain.cpp)
 target_include_directories(mr_ml_chain PUBLIC src)
-target_link_libraries(mr_ml_chain PUBLIC mr_ml_smart_fill mr_ml_temporal mr_ml_client mr_ml_core mr_ops)
+target_link_libraries(mr_ml_chain PUBLIC mr_ml_jump mr_ml_smart_fill mr_ml_temporal mr_ml_client mr_ml_core mr_ops)
 target_compile_options(mr_ml_chain PRIVATE -Wall -Wextra -fvisibility=hidden)
 add_executable(test_render_chain tests/test_render_chain.cpp)
 target_link_libraries(test_render_chain PRIVATE mr_ml_chain mr_ml_server mr_synth_lib Threads::Threads)

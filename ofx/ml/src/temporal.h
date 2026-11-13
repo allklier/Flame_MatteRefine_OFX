@@ -74,11 +74,44 @@ int flowScale(int h, int flowLines);
 // The flow at frame pixel (x, y) in frame px.
 void flowAt(const NeighbourFlow& f, double x, double y, double* dx, double* dy);
 
+// The flows stabilise() needs, computed once so that a caller can keep them as shared evidence
+// (Edge Recipes: Temporal and the strand presence vote) and pass them to stabilise() below.
+// Self-contained: owns every buffer. flows[k] = centre -> the frame at offsets[k] (frame order).
+// setupKey: the resolution, the flow grid scale, picture or mattes, and the flow params
+// (StabiliseParams: subjectWeighted, fbMaxPx, flow.*); stabilise() rejects a mismatch.
+// key: setupKey, the offsets and the flow-grid inputs (luma or matte, and matte) of every frame
+// used: the caller's cache check (flowKey() gives it for a set of frames without the flow).
+struct TemporalFlows {
+  int w = 0, h = 0, scale = 1;
+  bool picture = false;
+  std::vector<int> offsets;
+  std::vector<NeighbourFlow> flows;
+  unsigned long long setupKey = 0, key = 0;
+};
+// The neighbours used are those stabilise() uses (|offset| <= p.frames, within frames[0, count)).
+TemporalFlows computeFlows(const TemporalFrame* frames, int count, int centre, int w, int h,
+                           const StabiliseParams& p);
+unsigned long long flowKey(const TemporalFrame* frames, int count, int centre, int w, int h,
+                           const StabiliseParams& p);
+
 // frames: count consecutive frames, frames[centre] the one to stabilise; count may be 1 (out =
 // the centre matte) or less than 2 K + 1 at the sequence ends. out: w*h floats; may be the
 // centre matte (in place gives the same result).
+// weight (optional, w*h, clamped to 0-1, NaN = 0): out = in + weight * (stabilised - in), applied
+// as a factor on the region weight; nullptr = no weight (the same result as a weight of 1, bit for
+// bit); where weight = 0 the output is the input bit for bit and no neighbour is read; a hole all
+// of whose pixels have weight 0 is not judged (not counted in holesFilled); an all-zero weight
+// returns the input without computing the flow.
 void stabilise(const TemporalFrame* frames, int count, int centre, int w, int h,
-               const StabiliseParams& p, float* out, StabiliseStats* stats = nullptr);
+               const StabiliseParams& p, float* out, StabiliseStats* stats = nullptr,
+               const float* weight = nullptr);
+// The same with precomputed flows (computeFlows() on the same frames and flow params; it may hold
+// more neighbours than this call uses): bit-identical to computing them inside. Throws
+// std::invalid_argument, before writing out, when the resolution or the setup differ or a
+// neighbour's flow is missing. The frames' content is not checked: compare key with flowKey().
+void stabilise(const TemporalFrame* frames, int count, int centre, int w, int h,
+               const StabiliseParams& p, const TemporalFlows& flows, float* out,
+               StabiliseStats* stats = nullptr, const float* weight = nullptr);
 
 }  // namespace ml
 }  // namespace mr

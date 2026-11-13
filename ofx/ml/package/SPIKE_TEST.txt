@@ -9,11 +9,11 @@ WHAT THIS TESTS
   the runner program correctly. Expected: HD frame about 0.13 s, UHD about 0.3 s, first frame about 1.4 s.
 
 SETUP (assistant does the config; you do the sudo + restart)
-  1. sudo ln -s ~/MatteRefine_build/mlbench/repo/build_ml/MatteRefineML.ofx.bundle /usr/OFX/Plugins/
+  1. sudo ln -s ~/ClaudeCode/MatteRefine_build/mlbench/repo/build_ml/MatteRefineML.ofx.bundle /usr/OFX/Plugins/
   2. Restart Flame. The node is "Matte Refine ML" (group "Matte Refine").
   3. Log: ~/.cache/matte-refine/logs/matte-refine.log (one line per render), runner messages:
      ~/.cache/matte-refine/logs/runner-stderr.log
-  Runner status any time:  ~/MatteRefine_build/mlbench/repo/build_ml/MatteRefineML.ofx.bundle/Contents/Resources/mr_ml_runner --status
+  Runner status any time:  ~/ClaudeCode/MatteRefine_build/mlbench/repo/build_ml/MatteRefineML.ofx.bundle/Contents/Resources/mr_ml_runner --status
   To stop it:              ... mr_ml_runner --quit   (it also stops itself after 5 minutes idle)
 
 TESTS (use your real matte; picture on the front, the matte on the second socket (source alpha))

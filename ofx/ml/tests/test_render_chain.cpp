@@ -8,7 +8,8 @@
 // sequence ends, the neighbour collection with a fake fetcher (missing, threw, wrong size, not float,
 // no alpha, abort), the chain order (Temporal first, against stabilise() by hand), no neighbours =
 // the input, failure and abort pass-through, Temporal off = the previous chain, and the flicker on
-// the synthetic sequence through the chain. Usage: test_render_chain <fake runner>.
+// the synthetic sequence through the chain. Jump Repair: params, first in the chain, shared
+// neighbours, matte-only neighbours, failure / abort / off. Usage: test_render_chain <fake runner>.
 #include <signal.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -850,6 +851,170 @@ void testTemporalSequence() {
   }
 }
 
+// Jump Repair: params and the neighbour reach, the step alone = the core by hand (output, marks),
+// first in the chain (Temporal's input is its output), Temporal ignoring the farther neighbours
+// fetched for it, matte-only neighbours, not judged at the ends, failure and abort pass-through, and
+// off = the chain before it bit for bit.
+void testJumpChain() {
+  {
+    const JumpParams p = jumpParams(JumpUi());
+    CHECK(p.threshold == 0.5 && p.minSizePercent == 0.0125 && p.maxSpan == 1 && p.agree == 0.15 && p.motionGuard);
+    CHECK(jumpSpan(kJumpSpan1) == 1 && jumpSpan(kJumpSpan2) == 2 && jumpSpan(kJumpSpan3) == 3 && jumpSpan(7) == 1);
+    JumpUi u;
+    u.threshold = 3;
+    u.minSizePercent = -1;
+    u.span = kJumpSpan3;
+    const JumpParams q = jumpParams(u);
+    CHECK(q.threshold == 1.0 && q.minSizePercent == 0.0 && q.maxSpan == 3);
+    CHECK(neighbourReach(false, kTemporal2, false, kJumpSpan3) == 0 && neighbourReach(true, kTemporal1, false, 0) == 1 &&
+          neighbourReach(true, kTemporal2, false, 0) == 2 && neighbourReach(false, 0, true, kJumpSpan1) == 2 &&
+          neighbourReach(true, kTemporal1, true, kJumpSpan3) == 4 && neighbourReach(true, kTemporal2, true, kJumpSpan1) == 2);
+  }
+  // The Seq clip with an added blob (a 10x10 square of 1 in the background, frame 3 only).
+  Seq q;
+  const int t = 3, w = q.w, h = q.h;
+  const size_t n = size_t(w) * h;
+  for (int y = 20; y < 30; ++y)
+    for (int x = 20; x < 30; ++x) q.s.frames[size_t(t)].matte[size_t(y) * w + x] = 1.0f;
+  MaskSeg seg;
+  seg.mask.assign(n, 1.0f);
+  FakeTiles tiles;
+  std::vector<float> mid, out, tmo, jo;
+  std::vector<uint8_t> marks;
+  ChainResult r;
+  auto byHand = [&](const Neighbours& nb, const JumpParams& p, std::vector<uint8_t>* mk, JumpStats* st) {
+    const float* fr[2 * kJumpReach + 1] = {nullptr};
+    fr[kJumpReach] = q.m(t);
+    for (size_t i = 0; i < nb.offsets.size(); ++i) fr[nb.offsets[i] + kJumpReach] = nb.frames[i].matte.data();
+    std::vector<float> o(n);
+    repairJumps(fr, w, h, p, o.data(), st, mk);
+    return o;
+  };
+  // Alone, +-2 neighbours: the core by hand; the blob is gone; out = jumpOut = Temporal's input.
+  {
+    ChainParams p;
+    p.jumpRepair = true;
+    const Neighbours nb = neighboursOf(q, t, {-2, -1, 1, 2});
+    p.neighbours = &nb;
+    runChain(q.m(t), q.rgb(t), w, h, p, seg, tiles, &mid, &out, &r, std::function<bool()>(), nullptr,
+             std::function<void()>(), &tmo, &jo, &marks);
+    std::vector<uint8_t> want;
+    JumpStats st;
+    const std::vector<float> o = byHand(nb, jumpParams(p.jr), &want, &st);
+    CHECK(r.jRan && !r.jFailed && !r.jAborted && r.jr.judged && r.jr.repaired >= 1 && !r.tRan && !r.sfRan && !r.erRan);
+    CHECK(sameBits(out, o) && sameBits(jo, o) && sameBits(tmo, o) && sameBits(mid, o) && marks == want);
+    CHECK(out[size_t(25) * w + 25] < 0.01f && r.jr.pixelsChanged == st.pixelsChanged && r.jr.pixelsChanged >= 100);
+    // Only matte-only neighbours (no picture): the same.
+    Neighbours mo = nb;
+    for (FetchedFrame& f : mo.frames) {
+      f.rgb.clear();
+      f.matteOnly = true;
+    }
+    p.neighbours = &mo;
+    runChain(q.m(t), q.rgb(t), w, h, p, seg, tiles, &mid, &out, &r);
+    CHECK(!r.jFailed && sameBits(out, o));
+    std::printf("jump chain alone: repaired %d, changed %lld px, kept %d\n", r.jr.repaired, r.jr.pixelsChanged,
+                r.jr.keptMoved + r.jr.keptTurning + r.jr.keptNotStill);
+  }
+  // First in the chain: Temporal (K = 1) on Jump Repair's output, with the +-2 neighbours fetched for
+  // Jump Repair ignored by Temporal (= stabilise() on frames 2, 3', 4 by hand).
+  {
+    ChainParams p;
+    p.jumpRepair = p.temporal = true;
+    const Neighbours nb = neighboursOf(q, t, {-2, -1, 1, 2});
+    p.neighbours = &nb;
+    runChain(q.m(t), q.rgb(t), w, h, p, seg, tiles, &mid, &out, &r, std::function<bool()>(), nullptr,
+             std::function<void()>(), &tmo, &jo);
+    const std::vector<float> j = byHand(nb, jumpParams(p.jr), nullptr, nullptr);
+    std::vector<TemporalFrame> v = {{q.rgb(2), q.m(2)}, {q.rgb(t), j.data()}, {q.rgb(4), q.m(4)}};
+    std::vector<float> want(n);
+    stabilise(v.data(), 3, 1, w, h, temporalParams(p.tm, 1.0), want.data());
+    CHECK(r.jRan && r.tRan && !r.tFailed && r.tm.neighbours == 2 && sameBits(jo, j) && sameBits(tmo, want) &&
+          sameBits(out, want));
+    // Temporal on the input instead would differ (the check can tell the orders apart).
+    CHECK(!sameBits(want, q.byHand({2, 3, 4}, 1, temporalParams(p.tm, 1.0))));
+    // Temporal needs the picture of its +-1 neighbours: a matte-only -1 is its failure (the matte
+    // passes Temporal through), not Jump Repair's.
+    Neighbours mo = nb;
+    mo.frames[1].rgb.clear();
+    mo.frames[1].matteOnly = true;
+    p.neighbours = &mo;
+    runChain(q.m(t), q.rgb(t), w, h, p, seg, tiles, &mid, &out, &r, std::function<bool()>(), nullptr,
+             std::function<void()>(), &tmo, &jo);
+    CHECK(!r.jFailed && r.tFailed && sameBits(jo, j) && sameBits(out, j));
+  }
+  // Not judged (no -1 neighbour): the input bit for bit, the stats say so.
+  {
+    ChainParams p;
+    p.jumpRepair = true;
+    const Neighbours nb = neighboursOf(q, t, {1, 2});
+    p.neighbours = &nb;
+    runChain(q.m(t), q.rgb(t), w, h, p, seg, tiles, &mid, &out, &r, std::function<bool()>(), nullptr,
+             std::function<void()>(), nullptr, &jo, &marks);
+    CHECK(r.jRan && !r.jr.judged && sameBits(out, q.s.frames[size_t(t)].matte) &&
+          std::count(marks.begin(), marks.end(), uint8_t(kJumpNone)) == std::ptrdiff_t(n));
+    p.neighbours = nullptr;
+    runChain(q.m(t), q.rgb(t), w, h, p, seg, tiles, &mid, &out, &r);
+    CHECK(r.jRan && !r.jr.judged && !r.jFailed && sameBits(out, q.s.frames[size_t(t)].matte));
+  }
+  // Failure (a neighbour matte of another size): passes the matte through, the footer text;
+  // Temporal and Edge Refine still run on the input.
+  {
+    ChainParams p;
+    p.jumpRepair = p.edgeRefine = true;
+    Neighbours bad = neighboursOf(q, t, {-1, 1});
+    bad.frames[0].matte.resize(10);
+    p.neighbours = &bad;
+    FakeTiles t2;
+    runChain(q.m(t), q.rgb(t), w, h, p, seg, tiles, &mid, &out, &r, std::function<bool()>(), nullptr,
+             std::function<void()>(), nullptr, &jo, &marks);
+    std::vector<float> er(n);
+    refineEdge(q.m(t), q.rgb(t), er.data(), w, h, p.er, t2, nullptr);
+    CHECK(r.jFailed && r.jError == "Jump Repair: neighbour -1 has no 480x270 matte" &&
+          sameBits(jo, q.s.frames[size_t(t)].matte) && r.erRan && sameBits(out, er));
+    std::printf("jump failure footer text: '%s'\n", r.jError.c_str());
+  }
+  // Abort before the step: the matte passes through.
+  {
+    ChainParams p;
+    p.jumpRepair = true;
+    const Neighbours nb = neighboursOf(q, t, {-1, 1});
+    p.neighbours = &nb;
+    runChain(q.m(t), q.rgb(t), w, h, p, seg, tiles, &mid, &out, &r, []() { return true; });
+    CHECK(r.jAborted && sameBits(out, q.s.frames[size_t(t)].matte));
+  }
+  // Off: the neighbours (+-2) are there, the chain is the one before Jump Repair (Temporal K = 1 +
+  // Edge Refine on the input), bit for bit; marks none, jumpOut = the input.
+  {
+    ChainParams p;
+    p.temporal = p.edgeRefine = true;
+    const Neighbours nb = neighboursOf(q, t, {-2, -1, 1, 2}), nb1 = neighboursOf(q, t, {-1, 1});
+    p.neighbours = &nb;
+    std::vector<float> out1, mid1;
+    runChain(q.m(t), q.rgb(t), w, h, p, seg, tiles, &mid, &out, &r, std::function<bool()>(), nullptr,
+             std::function<void()>(), nullptr, &jo, &marks);
+    CHECK(!r.jRan && sameBits(jo, q.s.frames[size_t(t)].matte) &&
+          std::count(marks.begin(), marks.end(), uint8_t(kJumpNone)) == std::ptrdiff_t(n));
+    p.neighbours = &nb1;
+    ChainResult r1;
+    runChain(q.m(t), q.rgb(t), w, h, p, seg, tiles, &mid1, &out1, &r1);
+    CHECK(sameBits(out, out1) && sameBits(mid, mid1));
+  }
+  // The View "Jumps" colours.
+  {
+    float rgb[3];
+    jumpsViewRgb(kJumpKept, 0.3f, 0.3f, rgb);
+    CHECK(rgb[0] == 1.0f && rgb[1] == 0.0f && rgb[2] == 0.0f);
+    jumpsViewRgb(kJumpRepaired, 1.0f, 0.0f, rgb);  // lowered: green
+    CHECK(rgb[0] == 0.0f && rgb[1] == 1.0f && rgb[2] == 0.0f);
+    jumpsViewRgb(kJumpRepaired, 0.0f, 1.0f, rgb);  // raised: magenta
+    CHECK(rgb[0] == 1.0f && rgb[1] == 0.0f && rgb[2] == 1.0f);
+    jumpsViewRgb(kJumpNone, 0.4f, 0.4f, rgb);
+    CHECK(rgb[0] == 0.4f && rgb[1] == 0.4f && rgb[2] == 0.4f);
+  }
+  std::printf("jump chain: ok\n");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -882,6 +1047,7 @@ int main(int argc, char** argv) {
   test("collect neighbours", testCollectNeighbours);
   test("temporal chain", testTemporalChain);
   test("temporal sequence", testTemporalSequence);
+  test("jump chain", testJumpChain);
   {
     RunnerClientOptions o = opts();
     RunnerClient(o).quit(nullptr);

@@ -486,9 +486,10 @@ int serve(const ServerOptions& opts, Engine& engine) {
   _exit(0);
 }
 
-int controlMain(const std::string& cmd, const std::string& socket) {
+int controlMain(const std::string& cmd, const std::string& socket, const std::string& buildId) {
   RunnerClientOptions o;
   o.socketPath = socket;
+  o.buildId = buildId;
   o.name = "cli";
   o.startTimeoutS = 5;
   RunnerClient c(o);

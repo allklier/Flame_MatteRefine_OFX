@@ -1,0 +1,101 @@
+JUMP REPAIR TEST (Matte Refine ML): neighbour frames, cost, cache, the Jumps view
+=================================================================================
+Written 2026-11-12. About 45 minutes. The build is deployed by the assistant: RESTART FLAME first.
+Background: docs/jump_repair.md (what it does, the guards, the numbers on synthetic and real mattes). This is the
+first time Jump Repair runs in Flame; it also settles the open neighbour-fetch points of TEMPORAL_TEST.txt
+(docs/edge_recipes.md work package 0a: Edge Recipes will rely on the same fetch).
+
+NEW  Column "Jump Repair" (first in the chain, before Temporal): Enable (off) · Jump Above 0.5 · Min Size % 0.0125 ·
+  Span 1 (whole frames 1-3) · Motion Guards (on). View option "Jumps" (index 5).
+  It finds a patch of matte that appears (or a hole that opens) for 1-3 frames while the frames around it agree,
+  and puts the neighbours' value back there only. Everything else stays bit-identical.
+  Neighbours: Jump Repair needs t-(Span+1) .. t+(Span+1): Span 1 = t+-2, Span 2 = t+-3, Span 3 = t+-4. With Temporal
+  on the node fetches the larger of the two ranges once; frames beyond Temporal's +-K are fetched matte-only.
+
+THE LOG (~/.cache/matte-refine/logs/matte-refine.log; lines of one node carry "node=ml:<id>")
+  Follow it:  tail -f ~/.cache/matte-refine/logs/matte-refine.log | grep -E 'temporalClipAccess|getFramesNeeded|jump|temporal:'
+  L1  at Flame start:  "host: temporalClipAccess yes" (NO = Flame refuses neighbour frames; stop and report).
+  L2  "getFramesNeeded: first call: t=12 Jump Repair on: set Source [10, 14], clip range 0-96"
+      (or "Temporal + Jump Repair on" / "Temporal on" / "Temporal and Jump Repair off: host default").
+      Only the first call of each node is INFO; later calls only with Debug Logging on (column Support).
+  L3  per frame:  "render t=12 jump repair: above 0.5 min size 0.0125% (1037 px) span 1 | neighbours [-2,-1,1,2] |
+      judged, pairs 1 | flagged ... blobs 2: repaired 1, kept moved 1 turning 0 not still 0 | changed 89 px, max 1.000 |
+      flag .. blobs .. repair .. total 4.5 ms"
+  L4  per frame, Jump Repair on and Temporal OFF (new in this build):  "render t=12 jump repair fetch: clip range 0-96 |
+      neighbours requested 4 fetched 4: [ t=11 (-1) used 3840x2160 4ch 9.1 ms uid '...', host 8.0 ms, copy 1.1 ms; ...]
+      fetch 36.4 ms | centre uid '...' | getFramesNeeded 1 call(s) since the last render, last: t=12 ..."
+  L5  per frame, Temporal on:  "render t=12 temporal: ... neighbours requested 4 fetched 4 ...: [ the same per-neighbour
+      list ] fetch .. ms | ... getFramesNeeded N call(s) since the last render, last: ..."  (L4 is then not written.)
+  Per neighbour: "used" = good; "no image" / "threw: ..." / "size WxH, centre WxH" / "not float" = a failed fetch;
+  "SAME PIXELS AS THE CENTRE" = Flame ignored the time (bad). "host X ms" = what Flame spent producing that frame,
+  "copy" = our copy.
+  With Debug Logging on, one "jump blob: added|removed N px, box ..., moved .., turn .. -> repaired|kept ..." line per
+  blob (the guards' numbers).
+
+FOOTAGE (your own; frames only as guidance, write down which you used, not the clip name)
+  - a real matte (model / LTX / roto) over 40+ frames with a moment where the matte pops for 1-2 frames (if you
+    know one), a fast motion (hand, hair flick, a turn of the head), a still stretch, and the clip's first and last
+    frames;
+  - a UHD version and a small version of the same shot: for the small one put a Resize / crop upstream that makes it
+    424x562 (the size of the real matte sequence the numbers in docs/jump_repair.md come from).
+  - Injected jumps (no new footage needed): a Paint (or a keyframed shape) on the MATTE path, upstream of the node,
+    on ONE frame only:
+      J+  a white blob in empty background, clearly larger than Min Size (UHD: more than about 40x40 px; 424x562:
+          more than about 8x8 px), not touching the subject;
+      J-  a black hole inside a solid part of the subject, same size;
+      JM  the same white blob on three consecutive frames, moved by more than its own width each frame (fake motion).
+
+TESTS
+  A. Neighbour fetch honoured (question a).  Jump Repair ON, Temporal OFF, Span 1, Debug Logging on. Scrub to a frame
+     in the middle. Look for L1, L2 and L4. Expect: L2 range [t-2, t+2]; L4 "requested 4 fetched 4", all "used",
+     no "SAME PIXELS". Then Temporal ON (+-1): L2 / L5 still [t-2, t+2], Temporal's line lists 4 neighbours (the +-2
+     ones matte-only). Then Temporal +-2 and Span 3: range [t-4, t+4], 8 neighbours. If getFramesNeeded says
+     "never called" but the neighbours are "used", Flame fetches without asking: note it (it works).
+  B. Fetch cost (question b).  From L4 (Temporal off) and L5 (Temporal on), write down "host X ms" per neighbour and
+     "fetch .. ms" in total, at UHD and at 424x562, for Span 1 and Span 3. Play / scrub 10 frames: is the time per
+     neighbour stable, or is the first visit slow and a revisit fast (Flame's cache)? Also Batch Render 20 frames with
+     Jump Repair on vs off: total time.
+  C. Cache when a neighbour changes (question c).  Jump Repair on. Go to frame t, let it render (note the L3 line).
+     Add J+ on frame t+1 (only there). Go back to frame t. Does Flame render t again (a new L3 / L4 line for t, the
+     uid of the (+1) neighbour changed)? Or does it show the old result (no new line)? Then remove the paint: again?
+     This decides whether a changed neighbour invalidates the result (Edge Recipes needs the same).
+  D. The Jumps view (question d).  View = Jumps. Grey = the matte before Jump Repair; magenta = raised (a hole
+     filled back); green = lowered (a blob removed); red = a blob kept as motion. Output alpha = the repaired matte.
+       - J+ on frame t: at t the blob shows GREEN, the output alpha has no blob; L3 "repaired 1"; frames t-1, t+1 grey.
+       - J- on frame t: at t the hole shows MAGENTA and is filled in the output.
+       - JM: the blob shows RED on the middle frame (kept moved), it stays in the output; L3 "kept moved 1".
+       - your real pop (if any) and the fast motion: what is green / magenta / red? Screenshot the Jumps view.
+  E. Motion Guards and Span (question e).
+       - Motion Guards OFF on JM and on the fast motion: the red blobs become green / magenta (repaired); L3 "kept moved
+         0", more "repaired". Does anything that is real motion now get cut (a hand, hair)? That is what the guards
+         are for: note where.
+       - Span 1 / 2 / 3 with J+ painted on TWO consecutive frames: Span 1 should leave it (or only partly), Span 2
+         repair it where the surroundings are still. L3 "span 2", neighbours [-3..3]. Time per frame for each Span (L3
+         "total .. ms").
+  F. First and last frames (question f).  Frames 0 and 1 and the last two of the clip. Frame 0 and the last frame: the
+     footer "Jump Repair: this frame needs both neighbour frames (t-1 and t+1); it passes through." and L3 "NOT
+     judged"; the output = the input there. Frame 1 / the second last: judged with fewer neighbours (L4 lists
+     what was fetched), no error. With Span 3 the same at frames 0-3. No red node, no popup.
+  G. Off = unchanged (question g).
+       - Before the new build is deployed (or from a render you kept of the release version): render 10 frames of an
+         ML node with your usual settings to a clip. After the deploy reload that Batch: the node comes back with
+         Jump Repair OFF (new controls default off). Render the same 10 frames. A difference of the two (e.g. a Comp
+         in Difference mode) must be black everywhere (matte and RGB).
+       - With Jump Repair and Temporal both OFF the log has no "jump repair" lines, and L2 (if Flame calls it) says
+         "Temporal and Jump Repair off: host default".
+       (The automated tests check the same bit for bit: test_render_chain, ml_systest.)
+  Then Collect Logs and tell the assistant "jump repair test done".
+
+WHAT TO TELL THE ASSISTANT
+  | Question                                  | Write down                                                        |
+  |-------------------------------------------|-------------------------------------------------------------------|
+  | (a) temporalClipAccess / getFramesNeeded  | L1 yes/NO; L2 range for each setting; called per render (count)   |
+  | (a) neighbours                            | all "used"? any "no image" / "SAME PIXELS" / size mismatch        |
+  | (b) fetch cost, UHD                       | host ms per neighbour; fetch total; Span 1 vs 3; first vs revisit |
+  | (b) fetch cost, 424x562                   | the same                                                          |
+  | (c) neighbour changed                     | frame t re-rendered: yes / no / only after ...                    |
+  | (d) Jumps view                            | J+ green, J- magenta, JM red: as expected? your real pop          |
+  | (e) Motion Guards off / Span 1-3          | what changed; real motion cut anywhere; ms per frame              |
+  | (f) first / last frames                   | footer text, no error                                             |
+  | (g) off = unchanged                       | difference black: yes / no                                        |
+  | anything odd                              | lag, red node, popup, Flame slow to scrub                         |

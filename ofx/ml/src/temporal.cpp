@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include <memory>
+#include <stdexcept>
 
 #include "ops/edge_field.h"
 #include "ops/morphology.h"
@@ -94,21 +95,22 @@ int labelHoles(const float* m, int w, int h, std::vector<int>& label, std::vecto
 struct Neighbour {
   const float* matte;
   double base;
-  NeighbourFlow flow;
+  const NeighbourFlow* flow;
 };
 
 // Neighbour k's value and weight at frame pixel (x, y); weight 0 = no read.
 inline void readNeighbour(const Neighbour& nb, int w, int h, int x, int y, float* v, double* wt) {
   double dx, dy;
-  flowAt(nb.flow, x, y, &dx, &dy);
+  flowAt(*nb.flow, x, y, &dx, &dy);
   const double qx = x + dx, qy = y + dy;
   if (qx < 0 || qy < 0 || qx > w - 1 || qy > h - 1) {
     *wt = 0;
     return;
   }
-  const int s = nb.flow.scale;
+  const NeighbourFlow& f = *nb.flow;
+  const int s = f.scale;
   const float gx = float((x - (s - 1) * 0.5) / s), gy = float((y - (s - 1) * 0.5) / s);
-  const double c = sampleField(nb.flow.conf.data(), nb.flow.fwd.w, nb.flow.fwd.h, gx, gy);
+  const double c = sampleField(f.conf.data(), f.fwd.w, f.fwd.h, gx, gy);
   *wt = nb.base * c;
   *v = sampleBilinear(nb.matte, w, h, qx, qy);
 }
@@ -188,35 +190,115 @@ NeighbourFlow flowToNeighbour(const TemporalFrame& c, const TemporalFrame& nb, i
   return flowBetween(makeGrid(c, pic, w, h, p, wk), makeGrid(nb, pic, w, h, p, wk), p, wk);
 }
 
-void stabilise(const TemporalFrame* frames, int count, int centre, int w, int h, const StabiliseParams& p,
-               float* out, StabiliseStats* stats) {
+namespace {
+unsigned long long mix(unsigned long long h, unsigned long long v) {  // splitmix64 of (h ^ v)
+  unsigned long long z = (h ^ v) + 0x9e3779b97f4a7c15ull;
+  z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
+  z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
+  return z ^ (z >> 31);
+}
+unsigned long long bitsOf(double d) {
+  unsigned long long b;
+  std::memcpy(&b, &d, sizeof b);
+  return b;
+}
+unsigned long long hashPlane(unsigned long long h, const std::vector<float>& v) {
+  for (float f : v) {
+    unsigned int b;
+    std::memcpy(&b, &f, sizeof b);
+    h = mix(h, b);
+  }
+  return h;
+}
+
+bool usesPicture(const TemporalFrame* frames, int count, int centre, int K) {
+  bool pic = true;  // the picture only if every frame used has one
+  for (int i = 0; i < count; ++i)
+    if (std::abs(i - centre) <= K) pic = pic && frames[i].rgb;
+  return pic;
+}
+
+// Everything the flows depend on except the frames' content and the offsets.
+unsigned long long setupKeyOf(int w, int h, bool pic, const StabiliseParams& p) {
+  unsigned long long k = 0x54656d70466c6f77ull;  // "TempFlow"
+  for (unsigned long long v :
+       {(unsigned long long)w, (unsigned long long)h, (unsigned long long)flowScale(h, p.flowLines),
+        (unsigned long long)pic, (unsigned long long)p.subjectWeighted, bitsOf(p.fbMaxPx),
+        (unsigned long long)p.flow.levels, (unsigned long long)p.flow.iterations, (unsigned long long)p.flow.radius,
+        bitsOf(p.flow.damping), bitsOf(p.flow.lambda), bitsOf(p.flow.matteGain)})
+    k = mix(k, v);
+  return k;
+}
+
+// The grids of the frames used, the key over them (withKey) and the flows (withFlow).
+TemporalFlows flowsImpl(const TemporalFrame* frames, int count, int centre, int w, int h, const StabiliseParams& p,
+                        bool withKey, bool withFlow, Workers* wk) {
+  TemporalFlows f;
+  const int K = std::max(p.frames, 0);
+  f.w = w;
+  f.h = h;
+  f.picture = usesPicture(frames, count, centre, K);
+  f.scale = flowScale(h, p.flowLines);
+  f.setupKey = f.key = setupKeyOf(w, h, f.picture, p);
+  if (w <= 0 || h <= 0) return f;
+  const Grid gc = makeGrid(frames[centre], f.picture, w, h, p, wk);
+  if (withKey) f.key = hashPlane(hashPlane(mix(f.key, 0), gc.l), gc.m);
+  for (int i = 0; i < count; ++i) {
+    if (i == centre || std::abs(i - centre) > K) continue;
+    const Grid g = makeGrid(frames[i], f.picture, w, h, p, wk);
+    if (withKey) f.key = hashPlane(hashPlane(mix(f.key, (unsigned long long)(long long)(i - centre)), g.l), g.m);
+    f.offsets.push_back(i - centre);
+    if (withFlow) f.flows.push_back(flowBetween(gc, g, p, wk));
+  }
+  return f;
+}
+
+void stabiliseImpl(const TemporalFrame* frames, int count, int centre, int w, int h, const StabiliseParams& p,
+                   const TemporalFlows* given, float* out, StabiliseStats* stats, const float* weight) {
   StabiliseStats st;
   const auto t0 = Clock::now();
   const size_t n = size_t(std::max(w, 0)) * std::max(h, 0);
   const float* cm = frames[centre].matte;
-  if (out != cm && n) std::memcpy(out, cm, n * sizeof(float));
   const int K = std::max(p.frames, 0);
   const double strength = std::min(std::max(p.strength, 0.0), 1.0);
   std::vector<Neighbour> nbs;
+  std::vector<int> offsets;
   for (int i = 0; i < count; ++i)
-    if (i != centre && std::abs(i - centre) <= K) nbs.push_back({frames[i].matte, baseWeight(i - centre), {}});
+    if (i != centre && std::abs(i - centre) <= K) {
+      nbs.push_back({frames[i].matte, baseWeight(i - centre), nullptr});
+      offsets.push_back(i - centre);
+    }
+  if (given) {  // checked before out is written
+    if (given->w != w || given->h != h)
+      throw std::invalid_argument("Temporal: the precomputed flows are for another resolution");
+    if (given->setupKey != setupKeyOf(w, h, usesPicture(frames, count, centre, K), p) ||
+        given->flows.size() != given->offsets.size())
+      throw std::invalid_argument("Temporal: the precomputed flows were made with other flow settings");
+    for (size_t k = 0; k < offsets.size(); ++k) {
+      const auto it = std::find(given->offsets.begin(), given->offsets.end(), offsets[k]);
+      if (it == given->offsets.end())
+        throw std::invalid_argument("Temporal: the precomputed flows lack a neighbour this frame uses");
+      nbs[k].flow = &given->flows[size_t(it - given->offsets.begin())];
+    }
+  }
+  if (out != cm && n) std::memcpy(out, cm, n * sizeof(float));
   st.neighbours = int(nbs.size());
-  if (nbs.empty() || n == 0 || strength == 0.0) {
+  bool anyWeight = !weight;
+  for (size_t i = 0; i < n && !anyWeight; ++i) anyWeight = weight[i] > 0;  // NaN: false
+  if (nbs.empty() || n == 0 || strength == 0.0 || !anyWeight) {
     st.totalMs = msSince(t0);
     if (stats) *stats = st;
     return;
   }
   Workers wk;
-  {
+  TemporalFlows own;
+  if (given) {
+    st.flowScale = given->scale;
+  } else {
     const auto tf = Clock::now();
-    bool pic = true;  // the picture only if every frame used has one
-    for (int i = 0; i < count; ++i)
-      if (std::abs(i - centre) <= K) pic = pic && frames[i].rgb;
-    const Grid gc = makeGrid(frames[centre], pic, w, h, p, &wk);
-    for (int i = 0, k = 0; i < count; ++i)
-      if (i != centre && std::abs(i - centre) <= K)
-        nbs[k++].flow = flowBetween(gc, makeGrid(frames[i], pic, w, h, p, &wk), p, &wk);
-    st.flowScale = nbs[0].flow.scale;
+    own = flowsImpl(frames, count, centre, w, h, p, false, true, &wk);
+    for (size_t k = 0; k < nbs.size(); ++k) nbs[k].flow = &own.flows[k];
+    st.flowScale = own.scale;
     st.flowMs = msSince(tf);
   }
 
@@ -233,10 +315,15 @@ void stabilise(const TemporalFrame* frames, int count, int centre, int w, int h,
     const size_t H = size_t(st.holes), N = nbs.size();
     std::vector<long long> pixels(H, 0), confident(H * N, 0);
     std::vector<double> sum(H * N, 0.0);
+    std::vector<uint8_t> judged(H, weight ? 0 : 1);  // with a weight: holes with a pixel of weight > 0
+    if (weight)
+      for (const Run& r : holeRuns)
+        for (int x = r.x0; x < r.x1 && !judged[r.hole]; ++x) judged[r.hole] = weight[size_t(r.y) * w + x] > 0;
     for (const Run& r : holeRuns)
       for (int x = r.x0; x < r.x1; ++x) {
         const int l = r.hole;
         ++pixels[l];
+        if (!judged[l]) continue;
         for (size_t k = 0; k < N; ++k) {
           float v = 0;
           double wt;
@@ -249,6 +336,7 @@ void stabilise(const TemporalFrame* frames, int count, int centre, int w, int h,
       }
     fillHole.assign(H, 0);
     for (size_t l = 0; l < H; ++l) {
+      if (!judged[l]) continue;
       double filled = 0, open = baseWeight(0);
       for (size_t k = 0; k < N; ++k) {
         const long long c = confident[l * N + k];
@@ -265,6 +353,10 @@ void stabilise(const TemporalFrame* frames, int count, int centre, int w, int h,
     const double d = std::fabs(sd[i]);
     if (d < band) r = d <= full ? 1.0 : (band - d) / (band - full);
     if (!label.empty() && label[i] >= 0 && fillHole[label[i]]) r = 1.0;
+    if (weight) {  // out = in + weight (stabilised - in): a factor on r (x 1 keeps r bit for bit)
+      const float wv = weight[i];
+      r = wv > 0 ? (wv < 1 ? r * wv : r) : 0.0;
+    }
     return r;
   };
   st.regionMs = msSince(tr);
@@ -334,6 +426,29 @@ void stabilise(const TemporalFrame* frames, int count, int centre, int w, int h,
   st.combineMs = msSince(tc);
   st.totalMs = msSince(t0);
   if (stats) *stats = st;
+}
+}  // namespace
+
+TemporalFlows computeFlows(const TemporalFrame* frames, int count, int centre, int w, int h,
+                           const StabiliseParams& p) {
+  Workers wk;
+  return flowsImpl(frames, count, centre, w, h, p, true, true, &wk);
+}
+
+unsigned long long flowKey(const TemporalFrame* frames, int count, int centre, int w, int h,
+                           const StabiliseParams& p) {
+  Workers wk;
+  return flowsImpl(frames, count, centre, w, h, p, true, false, &wk).key;
+}
+
+void stabilise(const TemporalFrame* frames, int count, int centre, int w, int h, const StabiliseParams& p,
+               float* out, StabiliseStats* stats, const float* weight) {
+  stabiliseImpl(frames, count, centre, w, h, p, nullptr, out, stats, weight);
+}
+
+void stabilise(const TemporalFrame* frames, int count, int centre, int w, int h, const StabiliseParams& p,
+               const TemporalFlows& flows, float* out, StabiliseStats* stats, const float* weight) {
+  stabiliseImpl(frames, count, centre, w, h, p, &flows, out, stats, weight);
 }
 
 }  // namespace ml

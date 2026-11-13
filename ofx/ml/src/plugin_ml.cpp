@@ -1,5 +1,6 @@
-// Matte Refine ML, phase 1 (ofx/ml/CLAUDE.md): one node, Temporal (B4, neighbour frames, no model), Smart
-// Fill (B3, BiRefNet) then Edge Refine (B1, ViTMatte), chained by render_chain.h. render() stays
+// Matte Refine ML, phase 1 (ofx/ml/CLAUDE.md): one node, Jump Repair (neighbour mattes, no model), Temporal
+// (B4, neighbour frames, no model), Smart Fill (B3, BiRefNet) then Edge Refine (B1, ViTMatte), chained by
+// render_chain.h. render() stays
 // synchronous per frame (decisions 14, 28); the model runs in mr_ml_runner, one process per user
 // shared by every node (decision 32: this binary holds no ONNX Runtime and loads no GPU library,
 // runner_client.h). Inputs: decision 35 (ofx/ml/CLAUDE.md): a filter, the picture on the front
@@ -61,6 +62,13 @@ constexpr const char* kPluginLabel = "Matte Refine ML";
 
 constexpr const char* kPView = "view";
 constexpr const char* kPPictureColour = "pictureColour";
+constexpr const char* kPJrEnable = "jrEnable";
+constexpr const char* kPJrThreshold = "jrThreshold";
+constexpr const char* kPJrMinSize = "jrMinSize";
+// Span is a 1-row number (whole frames 1-3), so Motion Guards fits the 5-row column (decision 19); the
+// earlier choice "jrSpan" (2 rows, never released) is not reused with another type.
+constexpr const char* kPJrSpan = "jrSpanFrames";
+constexpr const char* kPJrGuards = "jrGuards";
 constexpr const char* kPTmEnable = "tmEnable";
 constexpr const char* kPTmFrames = "tmFrames";
 constexpr const char* kPTmStrength = "tmStrength";
@@ -80,8 +88,8 @@ constexpr const char* kPCollectLogs = "collectLogs";
 constexpr const char* kPNodeId = "nodeId";
 
 // Stored as indexes in setups: append only.
-enum View { kViewPicture = 0, kViewMatte = 1, kViewTrimap = 2, kViewChanges = 3, kViewHoles = 4 };
-const char* const kViewNames[] = {"Picture", "Matte", "Trimap", "Changes", "Holes"};
+enum View { kViewPicture = 0, kViewMatte = 1, kViewTrimap = 2, kViewChanges = 3, kViewHoles = 4, kViewJumps = 5 };
+const char* const kViewNames[] = {"Picture", "Matte", "Trimap", "Changes", "Holes", "Jumps"};
 constexpr int kViewLast = int(sizeof kViewNames / sizeof kViewNames[0]) - 1;
 enum PictureColour { kColourAuto = 0, kColourBypass = 1 };
 const char* const kColourNames[] = {"Auto", "Bypass"};
@@ -246,6 +254,11 @@ class MatteRefineMLEffect : public OFX::ImageEffect {
     dst_ = fetchClip(kOfxImageEffectOutputClipName);
     view_ = fetchChoiceParam(kPView);
     pictureColour_ = fetchChoiceParam(kPPictureColour);
+    jrEnable_ = fetchBooleanParam(kPJrEnable);
+    jrThreshold_ = fetchDoubleParam(kPJrThreshold);
+    jrMinSize_ = fetchDoubleParam(kPJrMinSize);
+    jrSpan_ = fetchDoubleParam(kPJrSpan);
+    jrGuards_ = fetchBooleanParam(kPJrGuards);
     tmEnable_ = fetchBooleanParam(kPTmEnable);
     tmFrames_ = fetchChoiceParam(kPTmFrames);
     tmStrength_ = fetchDoubleParam(kPTmStrength);
@@ -286,19 +299,23 @@ class MatteRefineMLEffect : public OFX::ImageEffect {
     prefs.setClipComponents(*dst_, OFX::ePixelComponentRGBA);
   }
 
-  // Temporal (B4): the Source frames t - K .. t + K (clamped to the clip's range) when Temporal is on;
-  // off: nothing set, the host's default (frame t only). Logged (first call INFO, then DEBUG; the count
-  // and the last range go into the render's Temporal line): whether Flame calls it is UNVERIFIED.
+  // Temporal (B4) and Jump Repair: the Source frames t - K .. t + K (clamped to the clip's range), K the
+  // larger reach of the two (ml::neighbourReach), when either is on; both off: nothing set, the host's
+  // default (frame t only). Logged (first call INFO, then DEBUG; the count and the last range go into
+  // the render's Temporal line): whether Flame calls it is UNVERIFIED.
   void getFramesNeeded(const OFX::FramesNeededArguments& args, OFX::FramesNeededSetter& frames) override {
     LogScope scope(logNode_);
-    bool on = false;
+    bool tm = false, jr = false;
     int fi = ml::kTemporal1;
-    tmEnable_->getValueAtTime(args.time, on);
+    tmEnable_->getValueAtTime(args.time, tm);
     tmFrames_->getValueAtTime(args.time, fi);
+    jrEnable_->getValueAtTime(args.time, jr);
+    const int span = ml::jumpSpanIndex(jrSpan_->getValueAtTime(args.time));
+    const bool on = tm || jr;
     const ml::FrameRange r = sourceRange();
     double lo = args.time, hi = args.time;
     if (on) {
-      ml::framesNeededRange(args.time, ml::temporalK(fi), r, &lo, &hi);
+      ml::framesNeededRange(args.time, ml::neighbourReach(tm, fi, jr, span), r, &lo, &hi);
       OfxRangeD range;
       range.min = lo;
       range.max = hi;
@@ -306,7 +323,10 @@ class MatteRefineMLEffect : public OFX::ImageEffect {
     }
     char b[200];
     std::snprintf(b, sizeof b, "t=%g %s [%g, %g], clip range %s", args.time,
-                  on ? "Temporal on: set Source" : "Temporal off: host default", lo, hi, rangeText(r).c_str());
+                  on ? (tm ? (jr ? "Temporal + Jump Repair on: set Source" : "Temporal on: set Source")
+                           : "Jump Repair on: set Source")
+                     : "Temporal and Jump Repair off: host default",
+                  lo, hi, rangeText(r).c_str());
     std::lock_guard<std::mutex> lock(requestMutex_);
     if (fnTotal_++ == 0) LOGI("getFramesNeeded: first call: %s", b);
     else LOGD("getFramesNeeded: %s", b);
@@ -383,7 +403,8 @@ class MatteRefineMLEffect : public OFX::ImageEffect {
     }
     const double readMs = msSince(t0);
 
-    bool enable = true, onlyGrey = false, sfEnable = false, tmEnable = false;
+    bool enable = true, onlyGrey = false, sfEnable = false, tmEnable = false, jrEnable = false;
+    jrEnable_->getValueAtTime(args.time, jrEnable);
     enable_->getValueAtTime(args.time, enable);
     onlyGrey_->getValueAtTime(args.time, onlyGrey);
     sfEnable_->getValueAtTime(args.time, sfEnable);
@@ -393,7 +414,12 @@ class MatteRefineMLEffect : public OFX::ImageEffect {
     model = std::min(std::max(model, 0), 1);
     sfModel_->getValueAtTime(args.time, sfModel);
     sfModel = std::min(std::max(sfModel, 0), 1);
-    ml::ChainParams cp;  // matte -> Temporal -> Smart Fill -> Edge Refine (render_chain.h)
+    ml::ChainParams cp;  // matte -> Jump Repair -> Temporal -> Smart Fill -> Edge Refine (render_chain.h)
+    cp.jumpRepair = jrEnable;
+    cp.jr.threshold = jrThreshold_->getValueAtTime(args.time);
+    cp.jr.minSizePercent = jrMinSize_->getValueAtTime(args.time);
+    cp.jr.span = ml::jumpSpanIndex(jrSpan_->getValueAtTime(args.time));
+    jrGuards_->getValueAtTime(args.time, cp.jr.guards);
     cp.temporal = tmEnable;
     tmFrames_->getValueAtTime(args.time, cp.tm.frames);
     cp.tm.strength = tmStrength_->getValueAtTime(args.time);
@@ -416,20 +442,22 @@ class MatteRefineMLEffect : public OFX::ImageEffect {
     const ml::RefineStats& st = cr.er;
     ml::RunnerClientStats sfCs;  // the runner client's stats of the Smart Fill step
     bool ran = false;
-    std::string tmFooter;  // Temporal's footer (merged below)
-    bool tmError = false;
+    std::string tmFooter, jrFooter;  // Temporal's and Jump Repair's footers (merged below)
+    bool tmError = false, jrError = false;
+    jrMarks_.clear();
+    jrOut_.clear();
     const UserConfig cfg = loadUserConfig();
     auto get = [&](const char* k, const std::string& def) {
       auto it = cfg.find(k);
       return expandHome(it == cfg.end() || it->second.empty() ? def : it->second);
     };
     // The setup gate (gate.h, root decision 38): in a release bundle a missing setup (licences, the
-    // standard models, the CUDA libraries) turns every step off, Temporal too, and the footer says
-    // what is missing. A dev bundle is not gated.
+    // standard models, the CUDA libraries) turns every step off, Temporal and Jump Repair too, and the
+    // footer says what is missing. A dev bundle is not gated.
     const std::string modelDir = get("ml_model_dir", ml::defaultModelDir(homeDir()));
     const ml::GateResult g = ml::checkGate(bundleResourcesDir(), cfg, modelDir, get("ml_cuda_libs", ""));
     if (!g.open()) {
-      cp.temporal = cp.smartFill = cp.edgeRefine = false;
+      cp.jumpRepair = cp.temporal = cp.smartFill = cp.edgeRefine = false;
       warning = g.footer + (warning.empty() ? std::string() : " " + warning);
       error = true;
     }
@@ -449,8 +477,10 @@ class MatteRefineMLEffect : public OFX::ImageEffect {
     };
     needModel(&cp.smartFill, ml::segmentationModel(sfModel));
     needModel(&cp.edgeRefine, kModelDirs[model]);
-    if (src && (cp.edgeRefine || cp.smartFill || cp.temporal)) {
-      extractRgb(*src, rgb_);
+    if (src && (cp.edgeRefine || cp.smartFill || cp.temporal || cp.jumpRepair)) {
+      // The picture only for the steps that use it (Jump Repair alone: the mattes only).
+      if (cp.edgeRefine || cp.smartFill || cp.temporal) extractRgb(*src, rgb_);
+      else rgb_.clear();  // no step reads it
       ml::RunnerClientOptions ro;
       ro.runnerPath = get("ml_runner", defaultRunnerPath());
       ro.tileTimeoutS = std::atof(get("ml_tile_timeout_s", "20").c_str());
@@ -465,10 +495,13 @@ class MatteRefineMLEffect : public OFX::ImageEffect {
       client_->setModel(kModelDirs[model]);  // the model table ids (model_table.h)
       client_->resetStats();
       ml::RunnerSeg seg(*client_, ml::segmentationModel(sfModel));
-      ml::Neighbours nb;  // Temporal (B4): the neighbour frames from the host
-      if (cp.temporal) {
-        // A neighbour: Source at t + k, as the centre (picture RGB, matte = its alpha, decision 35).
+      ml::Neighbours nb;  // Jump Repair and Temporal (B4): the neighbour frames from the host
+      if (cp.temporal || cp.jumpRepair) {
+        const int tK = cp.temporal ? ml::temporalK(cp.tm.frames) : 0;
+        // A neighbour: Source at t + k, as the centre (picture RGB, matte = its alpha, decision 35); the
+        // picture only within Temporal's K (farther ones and Jump Repair alone: the matte only).
         auto fetch = [&](double time, ml::FetchedFrame* f) {
+          f->matteOnly = std::abs(std::lround(time - args.time)) > tK;
           const auto tf = std::chrono::steady_clock::now();
           std::unique_ptr<OFX::Image> img;
           try {
@@ -491,7 +524,8 @@ class MatteRefineMLEffect : public OFX::ImageEffect {
                 f->matte.swap(tmPool_.back().matte);
                 tmPool_.pop_back();
               }
-              extractRgb(*img, f->rgb);
+              if (f->matteOnly) f->rgb.clear();
+              else extractRgb(*img, f->rgb);
               extractMatte(*img, f->matte);
               if (samePixels(*f)) f->note += ", SAME PIXELS AS THE CENTRE";
             }
@@ -501,16 +535,17 @@ class MatteRefineMLEffect : public OFX::ImageEffect {
           std::snprintf(hb, sizeof hb, "%shost %.1f ms, copy %.1f ms", f->note.empty() ? "" : ", ", hostMs, f->ms - hostMs);
           f->note += hb;
         };
-        ml::collectNeighbours(args.time, ml::temporalK(cp.tm.frames), sourceRange(), w, h, fetch, &nb,
-                              [this]() { return abort(); });
+        ml::collectNeighbours(args.time, ml::neighbourReach(cp.temporal, cp.tm.frames, cp.jumpRepair, cp.jr.span),
+                              sourceRange(), w, h, fetch, &nb, [this]() { return abort(); });
         cp.neighbours = &nb;
       }
       ml::runChain(matte_.data(), rgb_.data(), w, h, cp, seg, *client_, &mid_, &result_, &cr,
                    [this]() { return abort(); }, view == kViewTrimap ? &trimap_ : nullptr, [&]() {
                      sfCs = client_->stats();  // Smart Fill's share; Edge Refine's starts at zero
                      client_->resetStats();
-                   }, &tmOut_);
+                   }, &tmOut_, &jrOut_, view == kViewJumps ? &jrMarks_ : nullptr);
       for (ml::FetchedFrame& f : nb.frames) tmPool_.push_back(std::move(f));
+      if (cr.jRan) jrFooter = logJumpRepair(args, cp, nb, cr, src->getUniqueIdentifier(), &jrError);
       if (cr.tRan) tmFooter = logTemporal(args, cp, nb, cr, src->getUniqueIdentifier(), &tmError);
       if (cr.sfRan) {
         if (cr.sfFailed) {
@@ -588,6 +623,10 @@ class MatteRefineMLEffect : public OFX::ImageEffect {
           ml::changesViewRgb(matte_[i], a, px);  // plugin 1's Show Changes colours
         } else if (view == kViewHoles) {
           ml::holesViewRgb(marks_.empty() ? uint8_t(ml::kMarkNone) : marks_[i], a, px);
+        } else if (view == kViewJumps) {  // Jump Repair's input and output (no step ran: the matte)
+          const bool ran = jrOut_.size() == matte_.size();
+          ml::jumpsViewRgb(jrMarks_.empty() ? uint8_t(ml::kJumpNone) : jrMarks_[i], matte_[i], ran ? jrOut_[i] : matte_[i],
+                           px);
         } else if (view == kViewMatte) {
           px[0] = px[1] = px[2] = a;
         } else if (view == kViewTrimap) {
@@ -608,6 +647,14 @@ class MatteRefineMLEffect : public OFX::ImageEffect {
         error = true;
       } else if (warning.empty()) {
         warning = tmFooter;
+      }
+    }
+    if (!jrFooter.empty()) {  // the same for Jump Repair (first in the chain: its failure leads)
+      if (jrError) {
+        warning = jrFooter + (warning.empty() ? std::string() : " " + warning);
+        error = true;
+      } else if (warning.empty()) {
+        warning = jrFooter;
       }
     }
     try {
@@ -699,10 +746,11 @@ class MatteRefineMLEffect : public OFX::ImageEffect {
  private:
   // A neighbour with the centre's pixels (a host that ignores the time): every 97th pixel compared.
   bool samePixels(const ml::FetchedFrame& f) const {
-    if (f.matte.size() != matte_.size() || f.rgb.size() != rgb_.size()) return false;
+    const bool rgb = !f.matteOnly;  // a matte-only neighbour: the mattes alone
+    if (f.matte.size() != matte_.size() || (rgb && f.rgb.size() != rgb_.size())) return false;
     for (size_t i = 0; i < matte_.size(); i += 97)
-      if (f.matte[i] != matte_[i] || f.rgb[i * 3] != rgb_[i * 3] || f.rgb[i * 3 + 1] != rgb_[i * 3 + 1] ||
-          f.rgb[i * 3 + 2] != rgb_[i * 3 + 2])
+      if (f.matte[i] != matte_[i] || (rgb && (f.rgb[i * 3] != rgb_[i * 3] || f.rgb[i * 3 + 1] != rgb_[i * 3 + 1] ||
+                                              f.rgb[i * 3 + 2] != rgb_[i * 3 + 2])))
         return false;
     return true;
   }
@@ -726,11 +774,8 @@ class MatteRefineMLEffect : public OFX::ImageEffect {
     return b;
   }
 
-  // Temporal's INFO line per frame (what the host returned for each neighbour, where the time went,
-  // getFramesNeeded since the last render) and its footer: a failure (error), no neighbour frames.
-  std::string logTemporal(const OFX::RenderArguments& args, const ml::ChainParams& cp, const ml::Neighbours& nb,
-                          const ml::ChainResult& cr, const std::string& centreUid, bool* isError) {
-    const ml::StabiliseParams tp = ml::temporalParams(cp.tm, cp.renderScale);
+  // Each neighbour as the host returned it: time, offset, status, size, channels, ms, uid and host cost.
+  static std::string neighbourList(const ml::Neighbours& nb) {
     std::string each;
     for (const ml::NeighbourReport& n : nb.report) {
       char b[200];
@@ -738,6 +783,63 @@ class MatteRefineMLEffect : public OFX::ImageEffect {
                     n.status.c_str(), n.w, n.h, n.components, n.ms, n.note.empty() ? "" : " ", n.note.c_str());
       each += b;
     }
+    return each;
+  }
+
+  // Jump Repair's INFO line per frame (its decisions and time; each blob at DEBUG: size, place, the
+  // guards' numbers, the decision) and its footer: a failure (error), a frame it could not judge.
+  // Without Temporal (whose line has them) a second INFO line "jump repair fetch:" reports each
+  // neighbour's fetch (status, host ms, uid) and the getFramesNeeded calls (JUMP_REPAIR_TEST.txt).
+  std::string logJumpRepair(const OFX::RenderArguments& args, const ml::ChainParams& cp, const ml::Neighbours& nb,
+                            const ml::ChainResult& cr, const std::string& centreUid, bool* isError) {
+    const ml::JumpParams jp = ml::jumpParams(cp.jr);
+    const ml::JumpStats& s = cr.jr;
+    std::string offs;
+    for (int k : nb.offsets) offs += (offs.empty() ? "" : ",") + std::to_string(k);
+    LOGI("render t=%g jump repair: above %.3g min size %.4g%% (%lld px) span %d | neighbours [%s] | %s pairs %d | "
+         "flagged %lld px, small blobs %d, blobs %zu: repaired %d, kept moved %d turning %d not still %d | changed "
+         "%lld px (grown %lld), max %.3f | flag %.1f blobs %.1f repair %.1f total %.1f ms%s%s%s",
+         args.time, jp.threshold, jp.minSizePercent, s.minArea, jp.maxSpan, offs.c_str(),
+         s.judged ? "judged," : "NOT judged (needs t-1 and t+1),", s.pairs, s.flaggedPixels, s.smallBlobs,
+         s.blobs.size(), s.repaired, s.keptMoved, s.keptTurning, s.keptNotStill, s.pixelsChanged, s.grownPixels, s.maxChange, s.flagMs,
+         s.blobMs, s.repairMs, s.totalMs, cr.jAborted ? " | aborted by the host" : "", cr.jFailed ? " | FAILED: " : "",
+         cr.jFailed ? cr.jError.c_str() : "");
+    for (const ml::JumpBlob& b : s.blobs)
+      LOGD("jump blob: %s %lld px, box %d,%d-%d,%d, refs %+d/%+d, mass %.1f, moved %.2f (%+d,%+d / %+d,%+d), turn %s "
+           "%.1f %.1f, moving %lld -> %s, grown %lld, changed %lld",
+           b.added ? "added" : "removed", b.area, b.x0, b.y0, b.x1, b.y1, b.before, b.after, b.mass, b.moveScore,
+           b.moveBeforeDx, b.moveBeforeDy, b.moveAfterDx, b.moveAfterDy, b.turnChecked ? "" : "(n/a)", b.turnBefore,
+           b.turnAfter, b.movingPixels, ml::jumpDecisionName(b.decision), b.grown, b.changed);
+    if (!cr.tRan) {
+      int fnCalls = 0;
+      std::string fnLast;
+      {
+        std::lock_guard<std::mutex> lock(requestMutex_);
+        fnCalls = fnCalls_;
+        fnLast = fnLast_.empty() ? "never called" : fnLast_;
+        fnCalls_ = 0;
+      }
+      LOGI("render t=%g jump repair fetch: clip range %s | neighbours requested %d fetched %d: [%s] fetch %.1f ms | "
+           "centre uid '%s' | getFramesNeeded %d call(s) since the last render, last: %s%s",
+           args.time, rangeText(sourceRange()).c_str(), nb.requested, int(nb.offsets.size()), neighbourList(nb).c_str(),
+           nb.fetchMs, centreUid.c_str(), fnCalls, fnLast.c_str(), nb.aborted ? " | aborted by the host" : "");
+    }
+    *isError = false;
+    if (cr.jFailed) {
+      *isError = true;
+      LOGE("ml: jump repair FAILED: %s", cr.jError.c_str());
+      return "Jump Repair: " + cr.jError + ". The matte passes through this step.";
+    }
+    if (cr.jAborted || s.judged) return "";
+    return "Jump Repair: this frame needs both neighbour frames (t-1 and t+1); it passes through.";
+  }
+
+  // Temporal's INFO line per frame (what the host returned for each neighbour, where the time went,
+  // getFramesNeeded since the last render) and its footer: a failure (error), no neighbour frames.
+  std::string logTemporal(const OFX::RenderArguments& args, const ml::ChainParams& cp, const ml::Neighbours& nb,
+                          const ml::ChainResult& cr, const std::string& centreUid, bool* isError) {
+    const ml::StabiliseParams tp = ml::temporalParams(cp.tm, cp.renderScale);
+    const std::string each = neighbourList(nb);
     int fnCalls = 0;
     std::string fnLast;
     {
@@ -894,8 +996,9 @@ class MatteRefineMLEffect : public OFX::ImageEffect {
 
   OFX::Clip *src_, *dst_;
   OFX::ChoiceParam *view_, *pictureColour_, *model_, *sfModel_, *tmFrames_;
-  OFX::BooleanParam *enable_, *onlyGrey_, *debugLog_, *sfEnable_, *tmEnable_;
-  OFX::DoubleParam *band_, *outer_, *mix_, *sfThreshold_, *sfMaxHole_, *tmStrength_, *tmBand_;
+  OFX::BooleanParam *enable_, *onlyGrey_, *debugLog_, *sfEnable_, *tmEnable_, *jrEnable_, *jrGuards_;
+  OFX::DoubleParam *band_, *outer_, *mix_, *sfThreshold_, *sfMaxHole_, *tmStrength_, *tmBand_, *jrThreshold_, *jrMinSize_,
+      *jrSpan_;
   std::string nodeId_, logNode_;
   bool inChangedParam_ = false;
   bool matteChecked_ = false, hasMatte_ = false;
@@ -905,6 +1008,8 @@ class MatteRefineMLEffect : public OFX::ImageEffect {
   bool outputLogged_ = false;
   std::vector<float> matte_, rgb_, mid_, result_, trimap_;  // reused across renders; mid_ = after Smart Fill
   std::vector<float> tmOut_;  // after Temporal (Smart Fill's input)
+  std::vector<float> jrOut_;  // after Jump Repair (Temporal's input)
+  std::vector<uint8_t> jrMarks_;  // view Jumps
   std::vector<ml::FetchedFrame> tmPool_;  // neighbour buffers, reused across renders
   int fnCalls_ = 0, fnTotal_ = 0;  // getFramesNeeded calls since the last Temporal render / in all (requestMutex_)
   std::string fnLast_;
@@ -1012,8 +1117,8 @@ class MatteRefineMLFactory : public OFX::PluginFactoryHelper<MatteRefineMLFactor
     dst->setSupportsTiles(false);
 
     // Flame: one group = one column of <= 5 rows (choice 2, others 1; a hidden param takes a
-    // slot too). Columns, in chain order: Matte (5) · Temporal (5) · Smart Fill (5) · Edge Refine (5) · Model &
-    // Support (5).
+    // slot too). Columns, in chain order: Matte (5) · Jump Repair (5) · Temporal (5) · Smart Fill (5) · Edge
+    // Refine (5) · Model & Support (5): six, the tab is full.
     OFX::PageParamDescriptor* page = desc.definePageParam("Edge Refine");
     auto group = [&](const char* name, const char* text) {
       auto* g = desc.defineGroupParam(name);
@@ -1055,7 +1160,8 @@ class MatteRefineMLFactory : public OFX::PluginFactoryHelper<MatteRefineMLFactor
                           "Picture: the Source input. Matte: the refined matte. Trimap: solid / edge band / "
                           "clear. Changes: the input matte in grey, added alpha magenta, removed green. "
                           "Holes: the refined matte in grey, holes Smart Fill filled in green, holes it kept "
-                          "as real gaps in red.");
+                          "as real gaps in red. Jumps: the input matte in grey, what Jump Repair added magenta, "
+                          "removed green, jumps it kept as real motion red.");
     for (const char* c : kViewNames) view->appendOption(c);
     view->setDefault(kViewPicture);
     view->setAnimates(false);
@@ -1077,7 +1183,28 @@ class MatteRefineMLFactory : public OFX::PluginFactoryHelper<MatteRefineMLFactor
     version->setEvaluateOnChange(false);
     version->setParent(*gMatte);
 
-    // Temporal (B4) first, then Smart Fill (B3), then Edge Refine: definition order = chain order (render_chain.h).
+    // Jump Repair first, then Temporal (B4), Smart Fill (B3), Edge Refine: definition order = chain order
+    // (render_chain.h).
+    auto* gJr = group("grpJumpRepair", "Jump Repair");
+    const ml::JumpUi jrDef;  // the defaults (test_render_chain checks them)
+    boolean(kPJrEnable, "Enable",
+            "Remove short jumps: a patch of matte that appears or vanishes for 1-3 frames while the frames "
+            "around it agree. Only those patches change; patches that move like a real object are kept.",
+            false, gJr);
+    number(kPJrThreshold, "Jump Above",
+           "How far (0-1) the matte must jump against both neighbour frames. Lower catches fainter jumps.",
+           jrDef.threshold, 0.05, 1.0, 2, 0.05, gJr);
+    number(kPJrMinSize, "Min Size %",
+           "Jumps smaller than this percentage of the frame are left alone (0.0125 % = 260 px in HD).",
+           jrDef.minSizePercent, 0.0, 1.0, 4, 0.0025, gJr);
+    number(kPJrSpan, "Span",
+           "How many frames a jump may last (1-3). 2 and 3: only where the matte around it is still.",
+           jrDef.span + 1, 1.0, 3.0, 0, 1.0, gJr);
+    boolean(kPJrGuards, "Motion Guards",
+            "On: patches that move like a real object (passing through, the end of a swing) are kept, shown red "
+            "in View Jumps. Off: every jump is repaired.",
+            jrDef.guards, gJr);
+
     auto* gTm = group("grpTemporal", "Temporal");
     const ml::TemporalUi tmDef;  // the defaults (test_render_chain checks them)
     boolean(kPTmEnable, "Enable",
