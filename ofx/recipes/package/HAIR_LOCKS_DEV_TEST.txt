@@ -1,0 +1,64 @@
+FLAME TEST: HAIR LOCKS (Edge Recipes dev bundle), first session
+================================================================
+Written 2026-11-13. About 45 minutes, one Flame restart. A dev build, not a release: nothing is gated, and no
+models are needed for the first half (the model steps are tested later, once setup.sh has been run).
+
+WHAT THIS TESTS
+  Hair Locks rebuilds thin hair strands that the main matte lost, inside a soft roto you draw (the Focus Region).
+  Everything outside the roto is left exactly as it is. "Rebuild Detail" CREATES matte from the picture, so it is
+  off until you switch it on. The first session checks that the node loads, that the views tell the truth, and that
+  the strands hold over time. Quality on real footage is the question; nothing here has been seen on real footage.
+
+SETUP (the assistant stages the files; you do the sudo + restart)
+  Folder: ~/MatteRefine_devtest/v2/  (EdgeRecipes.ofx.bundle and a newer MatteRefineML.ofx.bundle)
+  1. Quit Flame.
+  2. sudo rm /usr/OFX/Plugins/MatteRefineML.ofx.bundle                       (it is a symlink to the first test build)
+     sudo ln -s ~/MatteRefine_devtest/v2/MatteRefineML.ofx.bundle /usr/OFX/Plugins/
+     sudo ln -s ~/MatteRefine_devtest/v2/EdgeRecipes.ofx.bundle /usr/OFX/Plugins/
+  3. Start Flame. Log: ~/.cache/matte-refine/logs/matte-refine.log  (turn Debug Logging on in the node's Support column).
+  Put things back afterwards:
+     sudo rm /usr/OFX/Plugins/EdgeRecipes.ofx.bundle /usr/OFX/Plugins/MatteRefineML.ofx.bundle
+     sudo mv ~/MatteRefine_devtest/backup/MatteRefineML.ofx.bundle /usr/OFX/Plugins/
+
+FOOTAGE
+  P = the picture, M = your matte (the one that misses the locks), R = a soft roto around the lost locks, tracked so it
+  follows the head, as an alpha matte. A few dozen frames is enough. Nothing is measured from the picture by hand.
+
+TESTS
+  1. Menu. Is there a group "Edge Recipes" with "Hair Locks"? Add the node. Connect P to the front socket and M to the
+     second socket (source alpha). Connect R to the FOURTH socket (blue). Leave the third (Detail) empty.
+     Does it match the order you expect? Note the sockets' colours.
+  2. Pass-through. With every switch at its default and no roto connected, what does the node do? (Temporal is ON by
+     default and works on the whole matte when there is no roto: a fresh node therefore changes the matte a little.
+     Switch Temporal off and it must equal the input exactly.) View = Result Matte, then Picture.
+  3. Region. Connect R. View = Region: the feathered roto in white. Region Feather % changes its edge.
+  4. Rebuild. Turn Rebuild Detail ON (Edge Model stays OFF). Plan column: the line says "Rebuild ON: creates matte".
+       - View Candidates: the tracer's strands in green over the matte in grey.
+       - View Rebuilt: what was ADDED (green); pieces the vote dropped in dim red.
+       - View Changes: only inside the roto.
+       - Result Matte: scrub across the shot. Do the locks appear? Do they hold? Do wrong pieces appear
+         (a glove edge, the glasses frame)? Anything outside the roto must be unchanged.
+     Controls to try: Rebuild Min Confidence (lower = more pieces), Loose Pieces (off = only pieces joined to the
+     matte), Strand Gain (tab 1), Snap Amount. Note what each does to the locks.
+  5. Vote. Advanced tab: Temporal Vote off and on. With it on, strands should flicker less and one-frame false pieces
+     should go. Compare by scrubbing frame by frame.
+  6. Temporal. Temporal Amount on / off: the matte OUTSIDE the roto steadies, and the locks must not get erased.
+  7. Speed. Scrub; write down how long a frame takes (the log line "neighbour fetch" and the per-step timings). At UHD
+     the whole recipe with the vote is expected at about one second per frame; tell me if it feels slower.
+  8. Jump Repair (Advanced, off by default): turn it on for a frame range with known jumps.
+  9. Model steps (later, needs setup.sh): with Edge Model ON and no models, the Plan line says "Model: needs setup.sh"
+     and the other steps still run.
+  10. Save and reload the Batch with the node: values come back.
+
+WHAT TO TELL THE ASSISTANT
+  | Question                                   | Answer to write down                                              |
+  |--------------------------------------------|-------------------------------------------------------------------|
+  | (1) menu, sockets                          | group and name, socket count and colours                          |
+  | (2) pass-through                           | equal to the input with Temporal off? what changed with it on?    |
+  | (3) Region view                            | matches the roto? feather works?                                  |
+  | (4) locks rebuilt                          | recovered how much, which frames, wrong pieces where              |
+  | (5) vote                                   | flicker better / worse / the same                                 |
+  | (6) Temporal                               | locks erased? outside steadier?                                   |
+  | (7) speed                                  | seconds per frame at your frame size                              |
+  | anything odd                               | red node, popup, crash, labels cut off, Plan text not updating    |
+  Then send the log (Collect Logs on the node, or the lines with "vote:" and "neighbour fetch").

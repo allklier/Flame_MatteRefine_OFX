@@ -1,0 +1,1130 @@
+// Edge Recipes (decision 41, docs/edge_recipes.md 4): one binary, one OFX effect per recipe, grouping "Edge
+// Recipes". Each recipe has its OWN factory type RecipeFactory<Tag>: the Support library keeps the plugin uid in a
+// static member per factory TYPE (ofxsImageEffect.h:204-220), so sharing one class would dispatch every effect to
+// the last one constructed (test: recipes_mutant). Pattern verified in Flame by ofx/recipes/probe.
+// Hair Locks (WP7): render() runs the recipe's planner (ofx/recipes/core hair_locks.h): Jump Repair (Advanced,
+// off) -> region weight -> candidates (Edge Model = ViTMatte through this bundle's mr_ml_runner, Rebuild Detail =
+// the strand tracer, which CREATES matte from the picture, the optional Detail clip) -> [strand presence vote:
+// WP6 slot, skipped] -> fusion in the Focus Region -> Snap in the region -> Temporal outside the region. Controls
+// -> core params, Plan texts and view colours: hair_locks_ui.h; the candidate adapters: hair_locks_sources.h.
+// Nothing enabled (or every step skipped): the Source alpha bit for bit (2.4). The model step is gated per step
+// (4.6: gate.h checkGate + the selected model installed); the classical steps always run.
+// Inputs (4.4, decisions 4/35): Source = picture + base matte on its alpha; optional masks Detail, FocusRegion
+// (declared as Matte Merge's, plugin_merge.cpp). Colour as Matte Refine ML (decisions 23, 34: Picture Colour
+// Auto / Bypass through the preferred-colourspace request).
+// Footers: Flame did not show a persistent message as a footer in the probe; the Plan label strings (rewritten per
+// render) carry the same information in <= 28 characters; the persistent message is still set (as plugin 2).
+// Log: the shared log; every line of this bundle carries the node "recipes:<recipe>:<id>" (the process-wide
+// component stays "ofx": setLogComponent would rename every plugin's lines in the Flame process, log.h).
+
+#include <dlfcn.h>
+#include <sys/wait.h>
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
+#include <fstream>
+#include <iterator>
+#include <memory>
+#include <mutex>
+#include <random>
+#include <string>
+#include <typeinfo>
+#include <vector>
+
+#include "env_info.h"
+#include "gate.h"
+#include "hair_locks.h"
+#include "hair_locks_sources.h"
+#include "hair_locks_ui.h"
+#include "log.h"
+#include "ocio_encoding.h"
+#include "ofxColour.h"
+#include "ofxsImageEffect.h"
+#include "ofxsSupportPrivate.h"
+#include "ops/morphology.h"
+#include "process.h"
+#include "recipe_def.h"
+#include "render_chain.h"
+#include "runner_client.h"
+#include "runner_crops.h"
+#include "user_config.h"
+
+#ifndef ER_VERSION  // from ofx/recipes/plugin/CMakeLists.txt
+#define ER_VERSION "0.0.0"
+#endif
+#ifndef MR_GIT
+#define MR_GIT "unknown"
+#endif
+
+namespace {
+
+using namespace mr;
+using namespace mr::recipes;
+
+constexpr const char* kDetailClip = "Detail";       // as Matte Merge (plugin_merge.cpp:61); stored in setups
+constexpr const char* kRegionClip = "FocusRegion";  // as Matte Merge (plugin_merge.cpp:62)
+const char* const kModelDirs[] = {"vitmatte-small", "vitmatte-base"};  // model ids as plugin_ml.cpp:97
+const char* const kColourNames[] = {"Auto", "Bypass"};
+// Picture Colour Auto: the requested picture colourspace (plugin_ml.cpp:198, VERIFIED in Flame, decision 34).
+const char* const kPicturePref[] = {"Rec.1886 Rec.709 - Display"};
+
+std::string homeDir() {
+  const char* h = std::getenv("HOME");
+  return h ? h : "/tmp";
+}
+
+std::string expandHome(const std::string& p) { return p.compare(0, 2, "~/") == 0 ? homeDir() + p.substr(1) : p; }
+
+std::string timeStr(const char* fmt) {
+  std::time_t t = std::time(nullptr);
+  std::tm tm{};
+  localtime_r(&t, &tm);
+  char b[32];
+  std::strftime(b, sizeof b, fmt, &tm);
+  return b;
+}
+
+std::string randomId() {
+  std::random_device rd;
+  char b[9];
+  std::snprintf(b, sizeof b, "%08x", rd());
+  return b;
+}
+
+// <bundle>/Contents/Resources: licences.txt there makes a release bundle (the setup gate, gate.h).
+std::string bundleResourcesDir() {
+  Dl_info info{};
+  if (!dladdr(reinterpret_cast<void*>(&bundleResourcesDir), &info) || !info.dli_fname) return "";
+  std::string p = info.dli_fname;
+  for (int i = 0; i < 2; ++i) p = p.substr(0, p.rfind('/'));
+  return p + "/Resources";
+}
+
+std::string modelDirFrom(const UserConfig& cfg) {
+  const auto it = cfg.find("ml_model_dir");
+  return it == cfg.end() || it->second.empty() ? ml::defaultModelDir(homeDir()) : expandHome(it->second);
+}
+
+HostInfo hostInfo() {
+  HostInfo h;
+  if (const auto* d = OFX::getImageEffectHostDescription()) {
+    h.name = d->hostName;
+    h.label = d->hostLabel;
+    h.version = d->versionLabel + " (" + std::to_string(d->versionMajor) + "." + std::to_string(d->versionMinor) +
+                "." + std::to_string(d->versionMicro) + ")";
+  }
+  return h;
+}
+
+// Process-wide set-up once per binary, not per recipe (describe runs once per effect, 4.1).
+void loadOnce() {
+  static bool done = false;
+  if (done) return;
+  done = true;
+  logConfigure();
+  rotateLogs();
+  LogScope scope("recipes");
+  LOGI("==== Edge Recipes %s (%s) load ====", ER_VERSION, MR_GIT);
+  for (const auto& line : environmentSnapshot(hostInfo())) LOGI("env %s", line.c_str());
+}
+
+std::string versionText(const RecipeDef& d) {
+  return std::string("ER ") + ER_VERSION + ", " + d.label + " " + std::to_string(d.versionMajor) + "." +
+         std::to_string(d.versionMinor) + ", " + MR_GIT;
+}
+
+// The GetOutputColourspace answer (decisions 23, 34), as plugin_ml.cpp:206 outputColourspaceAnswer.
+std::string outputColourspaceAnswer(bool viewPicture, bool pictureConnected, bool bypass, const std::string& style,
+                                    bool configHasMatte) {
+  if (viewPicture && pictureConnected) return bypass ? "OfxColourspace_Source" : kPicturePref[0];
+  if (style == kOfxImageEffectColourManagementOCIO) return configHasMatte ? "Matte" : "Raw";
+  if (style == kOfxImageEffectColourManagementFull || style == kOfxImageEffectColourManagementCore)
+    return kOfxColourspaceRaw;
+  if (style == kOfxImageEffectColourManagementBasic) return kOfxColourspaceOfxRaw;
+  return "";
+}
+
+int componentCount(OFX::PixelComponentEnum c) {
+  return c == OFX::ePixelComponentRGBA ? 4 : c == OFX::ePixelComponentRGB ? 3 : 1;
+}
+
+float clamp01(float v) { return v > 0.0f ? (v < 1.0f ? v : 1.0f) : 0.0f; }  // NaN -> 0
+
+double msSince(std::chrono::steady_clock::time_point t) {
+  return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();
+}
+
+bool sameBits(float a, float b) { return std::memcmp(&a, &b, sizeof a) == 0; }
+
+// A matte, top-down (OFX rows are bottom-up), clamped to 0-1: Alpha-only -> its channel, RGBA -> A, RGB -> R for a
+// mask clip (as Matte Merge's extractMatte, plugin_merge.cpp:126-137), 1 for the Source (no alpha).
+void extractMatte(const OFX::Image& img, bool rgbIsMatte, std::vector<float>& m) {
+  const OfxRectI b = img.getBounds();
+  const int w = b.x2 - b.x1, h = b.y2 - b.y1, c = componentCount(img.getPixelComponents());
+  m.resize(size_t(w) * h);
+  for (int y = b.y1; y < b.y2; ++y) {
+    const auto* p = static_cast<const float*>(img.getPixelAddress(b.x1, y));
+    float* q = &m[size_t(b.y2 - 1 - y) * w];
+    for (int x = 0; x < w; ++x, p += c) q[x] = clamp01(c == 1 ? p[0] : c == 4 ? p[3] : rgbIsMatte ? p[0] : 1.0f);
+  }
+}
+
+// The picture, top-down, w*h*3 (as plugin_ml.cpp extractRgb).
+void extractRgb(const OFX::Image& img, std::vector<float>& rgb) {
+  const OfxRectI b = img.getBounds();
+  const int w = b.x2 - b.x1, h = b.y2 - b.y1, c = componentCount(img.getPixelComponents());
+  rgb.resize(size_t(w) * h * 3);
+  for (int y = b.y1; y < b.y2; ++y) {
+    const auto* p = static_cast<const float*>(img.getPixelAddress(b.x1, y));
+    float* q = &rgb[size_t(b.y2 - 1 - y) * w * 3];
+    for (int x = 0; x < w; ++x, p += c, q += 3) {
+      q[0] = p[0];
+      q[1] = c >= 3 ? p[1] : p[0];
+      q[2] = c >= 3 ? p[2] : p[0];
+    }
+  }
+}
+
+// The Hair Locks parts of one node (docs/edge_recipes.md 4.5: per instance one planner, one workspace, one
+// runner connection; nothing is shared between nodes and no content survives a render, decision 14).
+struct HairLocksEngine {
+  ModelSource model;
+  TracerSource tracer;
+  DetailSource detail;
+  WeightedTemporal temporal;  // Temporal (uses the vote's flows when they exist)
+  VoteStep vote{&tracer};     // the strand presence vote (WP6)
+  HairLocks hl{{&model, &tracer, &detail}, &temporal, &vote};  // sources in the order of CandidateIndex
+  Workspace ws;
+  Workers wk;  // one pool per node, shared by every step of a render
+  std::unique_ptr<ml::RunnerClient> client;  // this node's connection to its mr_ml_runner (made on first use)
+  std::unique_ptr<recipe::RunnerClientCrops> crops;
+  std::string clientPath;
+  double clientTimeout = 0;
+  std::vector<ml::FetchedFrame> pool;  // neighbour buffers, reused across renders
+};
+
+class RecipeEffect : public OFX::ImageEffect {
+ public:
+  RecipeEffect(OfxImageEffectHandle handle, const RecipeDef& def) : ImageEffect(handle), def_(def) {
+    src_ = fetchClip(kOfxImageEffectSimpleSourceClipName);
+    dst_ = fetchClip(kOfxImageEffectOutputClipName);
+    if (def_.detailSocket) detail_ = fetchClip(kDetailClip);
+    if (def_.regionSocket) region_ = fetchClip(kRegionClip);
+    view_ = fetchChoiceParam(kPView);
+    picColour_ = fetchChoiceParam(kPPicColour);
+    model_ = fetchChoiceParam(kPModel);
+    debugLog_ = fetchBooleanParam(kPDebugLog);
+    if (&def_ == &HairLocksTag::def()) hair_.reset(new HairLocksEngine());
+    try {
+      OFX::StringParam* nid = fetchStringParam(kPNodeId);
+      nid->getValue(nodeId_);
+      const bool fresh = nodeId_.empty();
+      if (fresh) {
+        nodeId_ = randomId();  // saved with the setup; copies share it (nothing may depend on it, probe)
+        nid->setValue(nodeId_);
+      }
+      // Behaviour pinning (4.2): a new node records the recipe revision it was made with.
+      OFX::IntParam* rev = fetchIntParam(kPRecipeRev);
+      int r = 0;
+      rev->getValue(r);
+      if (r == 0) {
+        r = def_.recipeRev;
+        rev->setValue(r);
+      }
+      logNode_ = std::string("recipes:") + def_.idSuffix + ":" + nodeId_;
+      LogScope scope(logNode_);
+      LOGI("createInstance %s (%s) recipeRev %d, node %s", def_.label, pluginId(def_).c_str(), r,
+           fresh ? "new" : "restored");
+      debugLog_->setValue(logLevel() == LogLevel::Debug);  // per user, not stored in setups
+    } catch (const std::exception& e) {
+      LOGE("createInstance: setting param values FAILED: %s [%s]", e.what(), typeid(e).name());
+    }
+  }
+
+  ~RecipeEffect() override {
+    LogScope scope(logNode_);
+    LOGI("destroyInstance %s", def_.label);
+  }
+
+  void getClipPreferences(OFX::ClipPreferencesSetter& prefs) override {
+    prefs.setClipComponents(*dst_, OFX::ePixelComponentRGBA);
+  }
+
+  // The union of the ENABLED steps' needs (2.3, planner.h unionNeeds): Jump Repair t +- (Span + 1), Temporal
+  // t +- K, the larger; none: nothing set (the host's default, frame t only). From the settings only, as plugin
+  // 2 (plugin_ml.cpp:306-335): Source [t - R, t + R] clamped to the clip's range. First call INFO, then DEBUG.
+  void getFramesNeeded(const OFX::FramesNeededArguments& args, OFX::FramesNeededSetter& frames) override {
+    LogScope scope(logNode_);
+    int reach = 0;
+    if (hair_) {
+      const HairLocksUi ui = readUi(args.time, detail_ && detail_->isConnected());
+      reach = unionNeeds(hair_->hl.recipe(hairLocksSettings(ui, 1080, 1.0))).neighbourReach;
+    }
+    const ml::FrameRange r = sourceRange();
+    double lo = args.time, hi = args.time;
+    if (reach > 0) {
+      ml::framesNeededRange(args.time, reach, r, &lo, &hi);
+      OfxRangeD range;
+      range.min = lo;
+      range.max = hi;
+      frames.setFramesNeeded(*src_, range);
+    }
+    char b[200];
+    std::snprintf(b, sizeof b, "t=%g reach %d: %s [%g, %g], clip range %s", args.time, reach,
+                  reach > 0 ? "set Source" : "host default", lo, hi, rangeText(r).c_str());
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (fnTotal_++ == 0) LOGI("getFramesNeeded: first call: %s", b);
+    else LOGD("getFramesNeeded: %s", b);
+    ++fnCalls_;
+    fnLast_ = b;
+  }
+
+  void changedParam(const OFX::InstanceChangedArgs& args, const std::string& name) override {
+    // Flame echoes our own setValue() as changedParam: only user edits, never re-entrantly
+    // (ofx/CLAUDE.md "Flame host behaviour").
+    if (args.reason != OFX::eChangeUserEdit || inChangedParam_) return;
+    struct Guard {
+      bool& b;
+      explicit Guard(bool& b) : b(b) { b = true; }
+      ~Guard() { b = false; }
+    } guard(inChangedParam_);
+    LogScope scope(logNode_);
+    LOGI("changedParam %s (user) time=%g", name.c_str(), args.time);
+    if (name == kPCollectLogs) {
+      collectLogs();
+    } else if (name == kPSaveMatte) {
+      sendMessage(OFX::Message::eMessageMessage, "", "Save Matte is not built yet in this version.");
+    } else if (name == kPDebugLog) {
+      bool on = false;
+      debugLog_->getValue(on);
+      UserConfig cfg = loadUserConfig();
+      cfg["log_level"] = on ? "debug" : "info";
+      const bool ok = saveUserConfig(cfg);
+      setLogLevel(on ? LogLevel::Debug : LogLevel::Info);
+      LOGI("debug logging %s (config %s)", on ? "on" : "off", ok ? "saved" : "NOT saved");
+    }
+  }
+
+  void render(const OFX::RenderArguments& args) override {
+    LogScope scope(logNode_);
+    const auto t0 = std::chrono::steady_clock::now();
+    std::unique_ptr<OFX::Image> out(dst_->fetchImage(args.time));
+    if (!out) {
+      LOGE("render t=%g: host returned no output image", args.time);
+      OFX::throwSuiteStatusException(kOfxStatFailed);
+    }
+    // Decision 35: the picture is Source, the matte its alpha. Footers as plugin 2 (plugin_ml.cpp:369-403).
+    std::string warning, shortWarning;
+    std::unique_ptr<OFX::Image> src(src_->isConnected() ? src_->fetchImage(args.time) : nullptr);
+    if (src && src->getPixelDepth() != OFX::eBitDepthFloat) {
+      warning = "Only 32-bit float images are supported.";
+      shortWarning = "Needs 32-bit float";
+      src.reset();
+    }
+    if (!src && warning.empty()) warning = shortWarning = "No picture.";
+    const OfxRectI sb = src ? src->getBounds() : out->getBounds();
+    const int w = sb.x2 - sb.x1, h = sb.y2 - sb.y1;
+    const size_t n = size_t(std::max(w, 0)) * std::max(h, 0);
+    const int sc = src ? componentCount(src->getPixelComponents()) : 0;
+    if (src && sc == 3) {
+      warning = "The picture has no alpha, so there is no matte: connect the matte to the node's second socket "
+                "(source alpha).";
+      shortWarning = "No alpha: use source alpha";
+    }
+    int view = kViewResult;
+    view_->getValueAtTime(args.time, view);
+    if (src) extractMatte(*src, false, matte_);
+    else matte_.assign(n, 0.0f);
+    if (src && sc != 3 && !matte_.empty()) {
+      const auto mm = std::minmax_element(matte_.begin(), matte_.end());
+      if (*mm.first == *mm.second && warning.empty()) {
+        char b[160];
+        std::snprintf(b, sizeof b,
+                      "The input matte is constant %.2f: no matte on the source alpha. Connect the matte to the "
+                      "node's second socket (source alpha).",
+                      *mm.first);
+        warning = b;
+        shortWarning = "Source alpha is constant";
+      }
+    }
+    const double readMs = msSince(t0);
+
+    bool error = false;
+    PlanResult res;
+    Recipe recipe;
+    PlanInputs pin;
+    ml::Neighbours nb;
+    std::string regionLog = "-", detailLog = "-";
+    result_ = matte_;
+    viewA_.clear();  // the view planes of this render only (buildViewPlanes); empty = not computed
+    viewB_.clear();
+    viewC_.clear();
+    if (hair_) {
+      HairLocksEngine& e = *hair_;
+      const bool run = src && sc != 3;  // a picture with a matte on its alpha
+      // Focus Region and Detail (mask clips, Alpha-only in Flame: probe 2026-11-12).
+      std::string maskErr;
+      const bool haveRegion = run && fetchMask(region_, args.time, sb, regionM_, &regionLog, &maskErr);
+      const bool haveDetail = run && fetchMask(detail_, args.time, sb, detailM_, &detailLog, &maskErr);
+      if (!maskErr.empty() && warning.empty()) {
+        warning = maskErr;
+        shortWarning = "Mask input: see log";
+        error = true;
+      }
+      long long regionPixels = 0;
+      if (haveRegion)
+        for (float v : regionM_) regionPixels += v > 0.0f;
+      if (haveRegion && regionPixels == 0 && warning.empty())
+        warning = "The Focus Region is black everywhere: the region steps pass the matte through.";
+      HairLocksUi ui = readUi(args.time, haveDetail);
+      // The model gate per step (4.6): gate.h checkGate; the selected model must be installed.
+      const UserConfig cfg = loadUserConfig();
+      const std::string modelDir = modelDirFrom(cfg);
+      const auto cuda = cfg.find("ml_cuda_libs");
+      const ml::GateResult g =
+          ml::checkGate(bundleResourcesDir(), cfg, modelDir, cuda == cfg.end() ? "" : expandHome(cuda->second));
+      const bool installed = ml::modelInstalled(modelDir, modelId(ui.model));
+      pin.gate = gateText(ui.edgeModel, ui.model, g.open(), installed);
+      const std::string gateDetail = pin.gate + " " + g.detail;
+      if (gateDetail != gateLogged_) {
+        LOGI("gate: %s%s%s (model folder %s)", pin.gate.c_str(), g.detail.empty() ? "" : ": ", g.detail.c_str(),
+             modelDir.c_str());
+        gateLogged_ = gateDetail;
+      }
+      // Controls -> the cores' params (hair_locks_ui.h).
+      const HairLocksSettings s = hairLocksSettings(ui, h, args.renderScale.x);
+      e.model.p = modelParams(ui);
+      e.model.region = s.region;
+      e.tracer.p = tracerParams(ui);
+      e.tracer.region = s.region;
+      e.tracer.keepLoose = ui.keepLoose;
+      e.tracer.linearise = colourMode() == kColourAuto;  // analysis only: the tracer measures in linear light
+      e.tracer.forVote = s.strandVote;
+      vote::setBars(e.tracer.vp, e.tracer.p);  // the vote applies the tracer's real bars
+      e.vote.ran = false;
+      e.temporal.usedSharedFlows = false;
+      e.detail.region = s.region;
+      e.detail.detailWidthPx = 0.5 / 100.0 * h;  // Matte Merge's Detail Width (matte_merge.h:81)
+      e.model.runner = [&]() { return runnerFor(cfg); };
+      recipe = e.hl.recipe(s);
+      const StepNeeds needs = unionNeeds(recipe);
+      if (run && (needs.flags & kNeedPicture)) extractRgb(*src, rgb_);
+      else rgb_.clear();
+      if (run && needs.neighbourReach > 0) fetchNeighbours(args, needs.neighbourReach, s, w, h, &nb);
+      FrameInputs in;
+      in.w = w;
+      in.h = h;
+      in.renderScale = args.renderScale.x;
+      in.time = args.time;
+      in.rgb = rgb_.empty() ? nullptr : rgb_.data();
+      in.base = matte_.data();
+      in.region = haveRegion ? regionM_.data() : nullptr;
+      in.detail = haveDetail ? detailM_.data() : nullptr;
+      in.nb = needs.neighbourReach > 0 ? &nb : nullptr;
+      in.modelGateOpen = g.open() && installed;
+      qc_.step = view == kViewJumps ? "jumpRepair" : view == kViewTrimap ? "model" : "";
+      qc_.plane.clear();
+      qc_.marks.clear();
+      if (e.client) e.client->resetStats();
+      if (run) {
+        result_.resize(n);
+        runRecipe(recipe, in, e.ws, result_.data(), &res, &e.wk, qc_.step.empty() ? nullptr : &qc_);
+        buildViewPlanes(view, in, s, res);
+      }
+      for (ml::FetchedFrame& f : nb.frames) e.pool.push_back(std::move(f));
+      pin.recipe = &recipe;
+      pin.res = run ? &res : nullptr;
+      pin.ui = ui;
+      pin.regionConnected = haveRegion;
+      pin.regionPixels = regionPixels;
+      if (e.vote.ran) {
+        pin.voteKept = e.vote.last.kept;
+        pin.voteDropped = e.vote.last.dropped;
+        pin.voteReinstated = e.vote.last.reinstated;
+        pin.voteFallback = e.vote.last.fallback;
+      }
+      for (const StepReport& r : res.steps)
+        if (r.failed) {
+          LOGE("render t=%g: step %s FAILED: %s (the matte passes through this step)", args.time, r.id.c_str(),
+               r.note.c_str());
+          if (warning.empty()) warning = r.label + ": " + r.note + ". The matte passes through this step.";
+          error = true;
+        }
+    }
+
+    // Output: alpha = the result; where no step changed a pixel, the Source alpha bit for bit (2.4: the
+    // cores work on the clamped matte, the pass-through keeps any value). RGB per View.
+    const auto tw = std::chrono::steady_clock::now();
+    const OfxRectI db = out->getBounds();
+    const OfxRectI& win = args.renderWindow;
+    const int dc = componentCount(dst_->getPixelComponents());
+    for (int y = std::max(win.y1, db.y1); y < std::min(win.y2, db.y2); ++y) {
+      auto* q = static_cast<float*>(out->getPixelAddress(std::max(win.x1, db.x1), y));
+      const int row = sb.y2 - 1 - y;
+      for (int x = std::max(win.x1, db.x1); x < std::min(win.x2, db.x2); ++x, q += dc) {
+        const int col = x - sb.x1;
+        const bool inside = src && row >= 0 && row < h && col >= 0 && col < w;
+        const size_t i = inside ? size_t(row) * w + col : 0;
+        const float* p = inside ? static_cast<const float*>(src->getPixelAddress(x, y)) : nullptr;
+        const float raw = p ? (sc == 4 ? p[3] : sc == 1 ? p[0] : 1.0f) : 0.0f;
+        const float a = !inside ? 0.0f : sameBits(result_[i], matte_[i]) ? raw : result_[i];
+        if (dc == 1) {
+          q[0] = a;
+          continue;
+        }
+        if (!inside) q[0] = q[1] = q[2] = 0.0f;
+        else if (view == kViewPicture) {
+          q[0] = p[0];
+          q[1] = sc >= 3 ? p[1] : p[0];
+          q[2] = sc >= 3 ? p[2] : p[0];
+        } else {
+          viewRgb(view, i, a, q);
+        }
+        if (dc == 4) q[3] = a;
+      }
+    }
+    const double writeMs = msSince(tw);
+
+    if (hair_) {
+      pin.warning = shortWarning;
+      const PlanTexts pt = planTexts(pin);
+      setPlan(kPPlan, pt.plan);
+      setPlan(kPPlanRebuild, pt.rebuild);
+      setPlan(kPPlanGate, pt.model);
+      setPlan(kPPlanInputs, pt.inputs);
+      setPlan(kPPlanNote, pt.note);
+      logRender(args, w, h, view, recipe, res, nb, pin, src ? src->getUniqueIdentifier() : "", readMs, writeMs,
+                msSince(t0), regionLog, detailLog);
+    } else {
+      updateDummyPlan(view);
+      LOGD("render t=%g scale=%g view=%d colour %s | %s%s%s", args.time, args.renderScale.x, view,
+           kColourNames[colourMode()], lastRequest().c_str(), warning.empty() ? "" : " | ", warning.c_str());
+    }
+    try {
+      if (warning.empty())
+        clearPersistentMessage();
+      else  // no '%' in the text (the host formats it)
+        setPersistentMessage(error ? OFX::Message::eMessageError : OFX::Message::eMessageWarning, "", warning);
+    } catch (const std::exception& ex) {
+      LOGW("render: persistent message FAILED: %s", ex.what());
+    }
+  }
+
+  std::string outputColourspace() {
+    LogScope scope(logNode_);
+    int view = kViewResult;
+    view_->getValue(view);
+    std::string cs;
+    if (view == kViewPicture && src_->isConnected()) {
+      cs = outputColourspaceAnswer(true, true, colourMode() == kColourBypass, "", false);
+    } else {
+      const std::string style = getPropertySet().propGetString(kOfxImageEffectPropColourManagementStyle, false);
+      cs = outputColourspaceAnswer(false, src_->isConnected(), false, style,
+                                   style == kOfxImageEffectColourManagementOCIO && configHasMatte());
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!outputLogged_ || cs != lastOutputCs_) {
+      LOGI("colour: output colourspace answer '%s'%s", cs.c_str(), cs.empty() ? " (reply default)" : "");
+      lastOutputCs_ = cs;
+      outputLogged_ = true;
+    }
+    return cs;
+  }
+
+  // Picture Colour Auto requests the picture's colourspace on the out args of GetClipPreferences (OpenFX 1.5
+  // OfxImageClipPropPreferredColourspaces_Source; as plugin_ml.cpp:722). st = the Support library's status.
+  OfxStatus requestPicturePref(OfxPropertySetHandle out, OfxStatus st) {
+    LogScope scope(logNode_);
+    const int mode = colourMode();
+    std::string req = mode == kColourBypass ? "no request" : "no request (no Source)";
+    if (mode == kColourAuto && src_->isConnected()) {
+      const std::string prop = std::string(kOfxImageClipPropPreferredColourspaces) + "_" +
+                               kOfxImageEffectSimpleSourceClipName;
+      const OfxStatus s = OFX::Private::gPropSuite->propSetStringN(out, prop.c_str(), 1, kPicturePref);
+      req = std::string("requested '") + kPicturePref[0] + "' (" + OFX::mapStatusToString(s) + ")";
+      if (st == kOfxStatReplyDefault) st = kOfxStatOK;  // out args are read only on OK
+    }
+    LOGI("colour: clip preferences, Picture Colour %s, %s", kColourNames[mode], req.c_str());
+    std::lock_guard<std::mutex> lock(mutex_);
+    lastRequest_ = req;
+    return st;
+  }
+
+ private:
+  // The node's controls at time t (ids: recipe_def.cpp).
+  HairLocksUi readUi(double t, bool detailConnected) {
+    auto dbl = [&](const char* id) { return fetchDoubleParam(id)->getValueAtTime(t); };
+    auto boolean = [&](const char* id) {
+      bool v = false;
+      fetchBooleanParam(id)->getValueAtTime(t, v);
+      return v;
+    };
+    auto choice = [&](const char* id) {
+      int v = 0;
+      fetchChoiceParam(id)->getValueAtTime(t, v);
+      return v;
+    };
+    HairLocksUi u;
+    u.featherPct = dbl("rgFeather");
+    u.edgeModel = boolean("emEnable");
+    u.strandGain = dbl("emGain");
+    u.rebuild = boolean("rbEnable");
+    u.rebuildMinConf = dbl("rbMinConf");
+    u.temporalAmount = dbl("tmStrength");
+    u.snapAmount = dbl("rgSnapStrength");
+    u.model = std::min(std::max(choice(kPModel), 0), 1);
+    u.jumpRepair = boolean("jrEnable");
+    u.jr.threshold = dbl("jrThreshold");
+    u.jr.minSizePercent = dbl("jrMinSize");
+    u.jr.span = ml::jumpSpanIndex(dbl("jrSpanFrames"));
+    u.jr.guards = boolean("jrGuards");
+    u.growPct = dbl("rgGrow");
+    u.snap = boolean("rgSnap");
+    u.lowContrast = choice("emLowContrast");
+    u.keepLoose = boolean("rbKeepLoose");
+    u.vote = boolean("rbVote");
+    u.minPiecePx = dbl("rbMinPiece");
+    u.temporal = boolean("tmEnable");
+    u.temporalFrames = choice("tmFrames");
+    u.temporalBandPx = dbl("tmBand");
+    u.detailConnected = detailConnected;
+    return u;
+  }
+
+  // A mask clip at t into m (top-down, clamped, Matte Merge's rule). False when not connected or unusable
+  // (*err then says why: no image, not float, another size).
+  bool fetchMask(OFX::Clip* clip, double t, const OfxRectI& sb, std::vector<float>& m, std::string* log,
+                 std::string* err) {
+    if (!clip || !clip->isConnected()) {
+      *log = "not connected";
+      return false;
+    }
+    std::unique_ptr<OFX::Image> img;
+    try {
+      img.reset(clip->fetchImage(t));
+    } catch (const std::exception& ex) {
+      *log = std::string("fetch failed: ") + ex.what();
+    }
+    const std::string name = clip == region_ ? "Focus Region" : "Detail";
+    if (!img) {
+      if (log->empty() || *log == "-") *log = "no image";
+      if (err->empty()) *err = "No " + name + " image from the host: that input is not used.";
+      return false;
+    }
+    if (img->getPixelDepth() != OFX::eBitDepthFloat) {
+      *log = "not float";
+      if (err->empty()) *err = "The " + name + " input is not 32-bit float: it is not used.";
+      return false;
+    }
+    const OfxRectI b = img->getBounds();
+    char s[96];
+    std::snprintf(s, sizeof s, "%dch %d,%d-%d,%d", componentCount(img->getPixelComponents()), b.x1, b.y1, b.x2, b.y2);
+    *log = s;
+    if (b.x1 != sb.x1 || b.y1 != sb.y1 || b.x2 != sb.x2 || b.y2 != sb.y2) {
+      if (err->empty()) *err = "The " + name + " input is not the picture's size: it is not used.";
+      return false;
+    }
+    extractMatte(*img, true, m);
+    return true;
+  }
+
+  // Neighbours at t +- reach (render_chain.h collectNeighbours, as plugin_ml.cpp:498-541): the Source at t + k,
+  // the picture only within Temporal's K (farther ones, for Jump Repair, the matte only).
+  void fetchNeighbours(const OFX::RenderArguments& args, int reach, const HairLocksSettings& s, int w, int h,
+                       ml::Neighbours* nb) {
+    HairLocksEngine& e = *hair_;
+    // The picture for the frames Temporal and the vote read (the vote traces each neighbour's own picture).
+    const int tK = std::max(s.temporal ? s.tm.frames : 0, s.strandVote ? e.vote.K : 0);
+    auto fetch = [&](double time, ml::FetchedFrame* f) {
+      f->matteOnly = std::abs(std::lround(time - args.time)) > tK;
+      const auto tf = std::chrono::steady_clock::now();
+      std::unique_ptr<OFX::Image> img;
+      try {
+        img.reset(src_->fetchImage(time));
+      } catch (const std::exception& ex) {
+        f->error = ex.what();
+      }
+      const double hostMs = msSince(tf);
+      if (img) {
+        f->image = true;
+        const OfxRectI b = img->getBounds();
+        f->w = b.x2 - b.x1;
+        f->h = b.y2 - b.y1;
+        f->components = componentCount(img->getPixelComponents());
+        f->isFloat = img->getPixelDepth() == OFX::eBitDepthFloat;
+        f->note = "uid '" + img->getUniqueIdentifier() + "'";
+        if (f->isFloat && f->components == 4) {
+          if (!e.pool.empty()) {  // the buffers of an earlier render: no new pages per frame
+            f->rgb.swap(e.pool.back().rgb);
+            f->matte.swap(e.pool.back().matte);
+            e.pool.pop_back();
+          }
+          if (f->matteOnly) f->rgb.clear();
+          else extractRgb(*img, f->rgb);
+          extractMatte(*img, false, f->matte);
+        }
+      }
+      f->ms = msSince(tf);
+      char hb[64];
+      std::snprintf(hb, sizeof hb, "%shost %.1f ms, copy %.1f ms", f->note.empty() ? "" : ", ", hostMs, f->ms - hostMs);
+      f->note += hb;
+    };
+    ml::collectNeighbours(args.time, reach, sourceRange(), w, h, fetch, nb, [this]() { return abort(); });
+  }
+
+  // The model step's runner: this node's RunnerClient (as plugin_ml.cpp:484-494), made on first use; the runner
+  // is <bundle>/Contents/Resources/mr_ml_runner, or the config key er_runner (docs/edge_recipes.md 1.3: own keys
+  // er_*); ml_tile_timeout_s as plugin 2. A changed config gets a new connection.
+  recipe::CropRunner* runnerFor(const UserConfig& cfg) {
+    HairLocksEngine& e = *hair_;
+    auto get = [&](const char* k, const std::string& def) {
+      auto it = cfg.find(k);
+      return expandHome(it == cfg.end() || it->second.empty() ? def : it->second);
+    };
+    ml::RunnerClientOptions ro;
+    const std::string res = bundleResourcesDir();
+    ro.runnerPath = get("er_runner", res.empty() ? "" : res + "/mr_ml_runner");
+    ro.tileTimeoutS = std::atof(get("ml_tile_timeout_s", "20").c_str());
+    if (!(ro.tileTimeoutS > 0)) ro.tileTimeoutS = 20;
+    ro.name = logNode_;
+    if (!e.client || ro.runnerPath != e.clientPath || ro.tileTimeoutS != e.clientTimeout) {
+      e.crops.reset();
+      e.client.reset(new ml::RunnerClient(ro));
+      e.crops.reset(new recipe::RunnerClientCrops(*e.client));
+      e.clientPath = ro.runnerPath;
+      e.clientTimeout = ro.tileTimeoutS;
+    }
+    return e.crops.get();
+  }
+
+  // The planes the View reads after the render (4.3): Region (the prepared weight), Candidates (each
+  // candidate's alpha, full frame), Rebuilt (what the fusion raised where the tracer proposed alpha).
+  void buildViewPlanes(int view, const FrameInputs& in, const HairLocksSettings& s, const PlanResult& res) {
+    Workspace& ws = hair_->ws;
+    const size_t n = size_t(in.w) * in.h;
+    if (view == kViewRegion && in.region) {
+      StepContext c{in, res.stats, ws.ev, res.finalVersion, &hair_->wk, nullptr};
+      viewA_ = regionWeight(c, s.region);  // computed in the render already when a region step ran
+    } else if (view == kViewCandidates || view == kViewRebuilt) {
+      viewA_.assign(n, 0.0f);
+      viewB_.assign(n, 0.0f);
+      viewC_.assign(n, 0.0f);
+      for (const CandidatePlanes& cp : ws.ev.candidates()) {
+        std::vector<float>* dst = cp.id == "model" ? &viewA_ : cp.id == "tracer" ? &viewB_ : &viewC_;
+        for (int y = cp.box.y0; y < cp.box.y1; ++y)
+          for (int x = cp.box.x0; x < cp.box.x1; ++x)
+            (*dst)[size_t(y) * in.w + x] = clamp01(cp.alpha[size_t(y - cp.box.y0) * cp.box.w() + (x - cp.box.x0)]);
+      }
+      if (view == kViewRebuilt) {  // added = result - the matte before the fusion, where the tracer proposed alpha
+        const std::vector<float>* base = ws.ev.plane("regionBase");
+        for (size_t i = 0; i < n; ++i)
+          viewA_[i] = base && viewB_[i] > 0.0f ? std::max(0.0f, result_[i] - (*base)[i]) : 0.0f;
+        hair_->vote.droppedPlane(in.w, in.h, viewC_);  // the pieces the vote dropped (empty: it did not run)
+      }
+    }
+  }
+
+  // RGB of one pixel for the views other than Picture; a = the output alpha.
+  void viewRgb(int view, size_t i, float a, float* q) const {
+    const float m = matte_[i], r = result_[i];
+    auto at = [i](const std::vector<float>& v) { return i < v.size() ? v[i] : 0.0f; };
+    switch (view) {
+      case kViewChanges:
+        ml::changesViewRgb(m, r, q);  // plugin 1's Show Changes colours (render_chain.h)
+        return;
+      case kViewRegion:
+        q[0] = q[1] = q[2] = at(viewA_);
+        return;
+      case kViewJumps:  // Jump Repair's input (the matte: it is the first step) and output
+        if (qc_.step == "jumpRepair" && qc_.plane.size() > i && qc_.marks.size() > i)
+          ml::jumpsViewRgb(qc_.marks[i], m, qc_.plane[i], q);
+        else
+          ml::changesViewRgb(m, m, q);
+        return;
+      case kViewCandidates:
+        candidatesViewRgb(m, at(viewA_), at(viewB_), at(viewC_), q);
+        return;
+      case kViewRebuilt:
+        rebuiltViewRgb(r, at(viewA_), at(viewC_), q);
+        return;
+      case kViewTrimap:
+        q[0] = q[1] = q[2] = qc_.step == "model" && qc_.plane.size() > i ? qc_.plane[i] : r;
+        return;
+      default:  // Result Matte
+        q[0] = q[1] = q[2] = a;
+    }
+  }
+
+  // One DEBUG line per render with per-step ms (planner.h planDebugLine), an INFO line when the plan's
+  // shape (which steps ran / skipped / failed) changes, the neighbour fetch line (INFO, as plugin 2's
+  // Temporal / "jump repair fetch" lines) and the model runner's session.
+  void logRender(const OFX::RenderArguments& args, int w, int h, int view, const Recipe& r, const PlanResult& res,
+                 const ml::Neighbours& nb, const PlanInputs& pin, const std::string& centreUid, double readMs,
+                 double writeMs, double totalMs, const std::string& regionLog, const std::string& detailLog) {
+    std::string shape;
+    for (const StepReport& s : res.steps)
+      shape += s.id + (s.ran ? "=ran " : s.failed ? "=fail " : s.note == "off" ? "=off " : "=skip(" + s.note + ") ");
+    if (shape != planShape_) {
+      LOGI("plan: %s | %s", planLine(r, res).c_str(), planNotice(res).c_str());
+      planShape_ = shape;
+    }
+    if (nb.requested > 0) {
+      int calls = 0;
+      std::string last;
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        calls = fnCalls_;
+        last = fnLast_.empty() ? "never called" : fnLast_;
+        fnCalls_ = 0;
+      }
+      std::string each;
+      for (const ml::NeighbourReport& q : nb.report) {
+        char b[200];
+        std::snprintf(b, sizeof b, "%s t=%g (%+d) %s %dx%d %dch %.1f ms%s%s", each.empty() ? "" : ";", q.time, q.offset,
+                      q.status.c_str(), q.w, q.h, q.components, q.ms, q.note.empty() ? "" : " ", q.note.c_str());
+        each += b;
+      }
+      LOGI("render t=%g neighbour fetch: clip range %s | requested %d fetched %d: [%s] fetch %.1f ms | centre uid '%s' "
+           "| getFramesNeeded %d call(s) since the last render, last: %s%s",
+           args.time, rangeText(sourceRange()).c_str(), nb.requested, int(nb.offsets.size()), each.c_str(), nb.fetchMs,
+           centreUid.c_str(), calls, last.c_str(), nb.aborted ? " | aborted by the host" : "");
+    }
+    const ml::RunnerClientStats cs = hair_->client ? hair_->client->stats() : ml::RunnerClientStats();
+    if (cs.sessionCreated)
+      LOGI("model: the runner (pid %d) created a session for %s: load %.0f ms, ep %s%s%s", hair_->client->runnerPid(),
+           hair_->model.p.modelId.c_str(), cs.loadMs, cs.ep.c_str(), cs.why.empty() ? "" : " because: ", cs.why.c_str());
+    const recipe::ModelCandidateStats& ms = hair_->model.stats;
+    const VoteStep& vs = hair_->vote;
+    if (vs.ran)
+      LOGD("render t=%g vote: neighbours traced %d judged %d | kept %d dropped %d reinstated %d%s%s | flows %.1f "
+           "trace %.1f vote %.1f ms | Temporal %s",
+           args.time, vs.traced, vs.last.judgedNeighbours, vs.last.kept, vs.last.dropped, vs.last.reinstated,
+           vs.last.fallback ? " | fallback: " : "", vs.last.fallback ? vs.last.note.c_str() : "", vs.flowMs, vs.traceMs,
+           vs.voteMs, hair_->temporal.usedSharedFlows ? "used the shared flows" : "computed its own flows");
+    LOGD("render t=%g %dx%d scale=%g view=%d | %s | inputs region %s, detail %s | model crops %zu prep %.1f run %.1f post "
+         "%.1f ms, runner pid %d round trip %.1f model %.1f ms ep %s | tracer pieces %d anchored %d | fetch %.1f ms | "
+         "read %.1f write %.1f render %.1f ms | colour %s, %s | %s / %s / %s / %s / %s",
+         args.time, w, h, args.renderScale.x, view, planDebugLine(r, res).c_str(), regionLog.c_str(), detailLog.c_str(),
+         ms.crops.size(), ms.prepMs, ms.runMs, ms.postMs, hair_->client ? hair_->client->runnerPid() : -1, cs.roundTripMs,
+         cs.runMs, cs.ep.empty() ? "-" : cs.ep.c_str(), hair_->tracer.pieces, hair_->tracer.anchored, nb.fetchMs, readMs,
+         writeMs, totalMs, kColourNames[colourMode()], lastRequest().c_str(), pin.gate.c_str(),
+         getPlan(kPPlan).c_str(), getPlan(kPPlanRebuild).c_str(), getPlan(kPPlanInputs).c_str(),
+         getPlan(kPPlanNote).c_str());
+  }
+
+  // A recipe without steps (the test dummy): the skeleton's pass-through Plan.
+  void updateDummyPlan(int view) {
+    setPlan(kPPlan, std::string(def_.label) + " " + std::to_string(def_.versionMajor) + "." +
+                        std::to_string(def_.versionMinor) + ": pass-through");
+    setPlan(kPPlanNote, view > kViewPicture ? "View not built yet: matte" : "Skeleton: no steps yet");
+  }
+
+  // The Plan column (4.3): label strings rewritten per render, only when the text changes (each setValue
+  // comes back as changedParam). Each <= kPlanMaxChars.
+  void setPlan(const char* id, const std::string& text) {
+    OFX::StringParam* p = fetchStringParam(id);
+    std::string cur;
+    p->getValue(cur);
+    if (cur != text) p->setValue(text);
+  }
+  std::string getPlan(const char* id) {
+    std::string v;
+    fetchStringParam(id)->getValue(v);
+    return v;
+  }
+
+  ml::FrameRange sourceRange() {
+    ml::FrameRange r;
+    try {
+      const OfxRangeD fr = src_->getFrameRange();
+      r.first = fr.min;
+      r.last = fr.max;
+      r.valid = fr.max >= fr.min;
+    } catch (...) {  // the host does not report it: no clamping (the log says "unknown")
+    }
+    return r;
+  }
+
+  static std::string rangeText(const ml::FrameRange& r) {
+    char b[64];
+    if (r.valid) std::snprintf(b, sizeof b, "%g-%g", r.first, r.last);
+    else std::snprintf(b, sizeof b, "unknown");
+    return b;
+  }
+
+  int colourMode() {
+    int mode = kColourAuto;
+    picColour_->getValue(mode);
+    return mode == kColourBypass ? kColourBypass : kColourAuto;
+  }
+
+  std::string lastRequest() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return lastRequest_.empty() ? "no clip preferences yet" : lastRequest_;
+  }
+
+  bool configHasMatte() {
+    if (!matteChecked_) {
+      matteChecked_ = true;
+      const std::string path = getPropertySet().propGetString(kOfxImageEffectPropOCIOConfig, false);
+      std::ifstream in(path);
+      const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+      hasMatte_ = colourspaceEncoding(text, "Matte") == "data";
+      LOGI("colour: OCIO config (%zu bytes), Matte colourspace %s", text.size(), hasMatte_ ? "found" : "not found (Raw)");
+    }
+    return hasMatte_;
+  }
+
+  // A support bundle, as Matte Refine ML's (plugin_ml.cpp:974): the log is shared.
+  void collectLogs() {
+    const std::string dir = logDir();
+    {
+      std::ofstream envf(dir + "/environment.txt");
+      for (const auto& line : environmentSnapshot(hostInfo())) envf << line << "\n";
+    }
+    const std::string bundle = homeDir() + "/matte-refine-support-" + timeStr("%Y%m%d-%H%M%S") + ".tar.gz";
+    const std::vector<std::string> argv = {"/usr/bin/tar", "-czf", bundle, "-C", dir.substr(0, dir.rfind('/')), "logs"};
+    std::string err;
+    WorkerProcess tar;
+    std::vector<std::string> lines;
+    const bool started = tar.start(argv, cleanEnvironment(), err);
+    if (started)
+      while (tar.readLines(200, lines)) {
+      }
+    const int status = started ? tar.wait() : -1;
+    const bool ok = started && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    LOGI("collectLogs: %s -> %s %s", ok ? "ok" : "FAILED", bundle.c_str(), err.c_str());
+    sendMessage(ok ? OFX::Message::eMessageMessage : OFX::Message::eMessageError, "",
+                ok ? "Support bundle written to " + bundle + ". Please review it before sending."
+                   : "Could not write the support bundle: " + err);
+  }
+
+  const RecipeDef& def_;
+  OFX::Clip *src_ = nullptr, *dst_ = nullptr, *detail_ = nullptr, *region_ = nullptr;
+  OFX::ChoiceParam *view_ = nullptr, *picColour_ = nullptr, *model_ = nullptr;
+  OFX::BooleanParam* debugLog_ = nullptr;
+  std::unique_ptr<HairLocksEngine> hair_;  // the Hair Locks effect's parts; nullptr for a recipe without steps
+  std::string nodeId_, logNode_, gateLogged_, planShape_;
+  bool inChangedParam_ = false;
+  bool matteChecked_ = false, hasMatte_ = false;
+  std::mutex mutex_;
+  std::string lastRequest_, lastOutputCs_;
+  bool outputLogged_ = false;
+  int fnCalls_ = 0, fnTotal_ = 0;  // getFramesNeeded calls since the last fetch line / in all (mutex_)
+  std::string fnLast_;
+  std::vector<float> matte_, result_, rgb_, regionM_, detailM_;  // reused across renders (top-down, w*h)
+  std::vector<float> viewA_, viewB_, viewC_;                     // view planes (buildViewPlanes)
+  QcLayer qc_;                                                   // the View's step layer (Jumps, Trimap)
+};
+
+
+template <class D>
+D* labelled(D* p, const char* label, const char* hint) {
+  p->setLabels(label, label, label);
+  if (hint && *hint) p->setHint(hint);
+  return p;
+}
+
+// Builds the descriptor from the table: one page per PageDef, one group (= Flame column) per ColumnDef.
+void describeFromDef(OFX::ImageEffectDescriptor& desc, const RecipeDef& d) {
+  OFX::ClipDescriptor* src = desc.defineClip(kOfxImageEffectSimpleSourceClipName);
+  src->addSupportedComponent(OFX::ePixelComponentRGBA);
+  src->addSupportedComponent(OFX::ePixelComponentRGB);
+  src->setSupportsTiles(false);
+  // Optional masks, as Matte Merge's Detail and Focus Region (plugin_merge.cpp:622-638): Detail first.
+  for (const char* name : {kDetailClip, kRegionClip}) {
+    if ((name == kDetailClip && !d.detailSocket) || (name == kRegionClip && !d.regionSocket)) continue;
+    OFX::ClipDescriptor* m = desc.defineClip(name);
+    m->addSupportedComponent(OFX::ePixelComponentAlpha);
+    m->addSupportedComponent(OFX::ePixelComponentRGBA);
+    m->addSupportedComponent(OFX::ePixelComponentRGB);
+    m->setIsMask(true);
+    m->setOptional(true);
+    m->setSupportsTiles(false);
+    const char* text = name == kDetailClip ? "Detail" : "Focus Region";
+    m->setLabels(text, text, text);
+  }
+  OFX::ClipDescriptor* dst = desc.defineClip(kOfxImageEffectOutputClipName);
+  dst->addSupportedComponent(OFX::ePixelComponentRGBA);
+  dst->addSupportedComponent(OFX::ePixelComponentAlpha);
+  dst->setSupportsTiles(false);
+
+  const std::string modelDir = modelDirFrom(loadUserConfig());  // the model choice's labels
+  for (const PageDef& pd : d.pages) {
+    OFX::PageParamDescriptor* page = desc.definePageParam(pd.name);
+    for (const ColumnDef& cd : pd.columns) {
+      auto* g = desc.defineGroupParam(cd.group);
+      g->setLabels(cd.label, cd.label, cd.label);
+      g->setOpen(true);
+      page->addChild(*g);
+      for (const ParamDef& p : cd.params) {
+        OFX::ParamDescriptor* base = nullptr;
+        switch (p.kind) {
+          case Kind::Bool: {
+            auto* b = labelled(desc.defineBooleanParam(p.id), p.label, p.hint);
+            b->setDefault(p.def != 0);
+            base = b;
+            break;
+          }
+          case Kind::Double: {
+            auto* n = labelled(desc.defineDoubleParam(p.id), p.label, p.hint);
+            n->setRange(p.lo, p.hi);
+            n->setDisplayRange(p.lo, p.hi);
+            n->setDigits(p.digits);
+            n->setIncrement(p.inc);
+            n->setDefault(p.def);
+            base = n;
+            break;
+          }
+          case Kind::Choice: {
+            auto* c = labelled(desc.defineChoiceParam(p.id), p.label, p.hint);
+            const std::vector<std::string>& opts = (p.flags & kViewOptions) ? d.views : p.options;
+            for (size_t i = 0; i < opts.size(); ++i)
+              c->appendOption((p.flags & kModelOptions)
+                                  ? ml::optionLabel(opts[i], ml::modelInstalled(modelDir, kModelDirs[std::min<size_t>(i, 1)]))
+                                  : opts[i]);
+            c->setDefault(int(p.def));
+            if (p.flags & kClipPrefSlave) desc.addClipPreferencesSlaveParam(*c);
+            base = c;
+            break;
+          }
+          case Kind::LabelString: {
+            auto* s = labelled(desc.defineStringParam(p.id), p.label, p.hint);
+            s->setStringType(OFX::eStringTypeLabel);
+            s->setDefault(std::string(p.id) == kPVersion ? versionText(d) : std::string());
+            base = s;
+            break;
+          }
+          case Kind::PushButton:
+            base = labelled(desc.definePushButtonParam(p.id), p.label, p.hint);
+            break;
+          case Kind::HiddenString: {  // hidden, but takes a slot: inside a group (ofx/CLAUDE.md)
+            auto* s = desc.defineStringParam(p.id);
+            s->setDefault("");
+            s->setIsSecret(true);
+            base = s;
+            break;
+          }
+          case Kind::HiddenInt: {
+            auto* i = desc.defineIntParam(p.id);
+            i->setDefault(int(p.def));
+            i->setIsSecret(true);
+            base = i;
+            break;
+          }
+        }
+        if (auto* vp = dynamic_cast<OFX::ValueParamDescriptor*>(base)) {  // ofxsParam.h:256-278
+          if (p.flags & kNoAnimate) vp->setAnimates(false);
+          if (p.flags & kNotPersistent) vp->setIsPersistant(false);
+          if (p.flags & kNoEvaluate) vp->setEvaluateOnChange(false);
+        }
+        base->setParent(*g);
+      }
+    }
+  }
+}
+
+// One factory TYPE per recipe (docs/edge_recipes.md 4.1). ER_MUTANT_SHARED_FACTORY (test build only) gives a
+// second recipe the SAME class (RecipeFactory<HairLocksTag> constructed with another def): the error this
+// design exists to prevent; test recipes_mutant must fail on it.
+template <class Tag>
+class RecipeFactory : public OFX::PluginFactoryHelper<RecipeFactory<Tag>> {
+  using Helper = OFX::FactoryMainEntryHelper<RecipeFactory<Tag>>;
+
+ public:
+  explicit RecipeFactory(const RecipeDef& d = Tag::def())
+      : OFX::PluginFactoryHelper<RecipeFactory<Tag>>(pluginId(d), d.versionMajor, d.versionMinor), def_(d) {}
+
+  // GetOutputColourspace (OpenFX 1.5) is unknown to the 1.4 Support library: answered here; the Picture
+  // Colour request is added after the Support library's GetClipPreferences (as plugin_ml.cpp:1033-1062).
+  static OfxStatus entry(const char* action, const void* handle, OfxPropertySetHandle in, OfxPropertySetHandle out) {
+    if (std::strcmp(action, kOfxImageEffectActionGetOutputColourspace) == 0) {
+      try {
+        auto* fx = dynamic_cast<RecipeEffect*>(OFX::Private::retrieveImageEffectPointer((OfxImageEffectHandle)handle));
+        const std::string cs = fx ? fx->outputColourspace() : "";
+        if (cs.empty()) return kOfxStatReplyDefault;
+        OFX::PropertySet(out).propSetString(kOfxImageClipPropColourspace, cs);
+        return kOfxStatOK;
+      } catch (const std::exception& e) {
+        LOGE("colour: GetOutputColourspace FAILED: %s", e.what());
+        return kOfxStatFailed;
+      }
+    }
+    if (std::strcmp(action, kOfxImageEffectActionGetClipPreferences) == 0) {
+      const OfxStatus st = Helper::mainEntry(action, handle, in, out);
+      if (st != kOfxStatOK && st != kOfxStatReplyDefault) return st;
+      try {
+        auto* fx = dynamic_cast<RecipeEffect*>(OFX::Private::retrieveImageEffectPointer((OfxImageEffectHandle)handle));
+        return fx ? fx->requestPicturePref(out, st) : st;
+      } catch (const std::exception& e) {
+        LOGE("colour: clip preferences FAILED: %s", e.what());
+        return st;
+      }
+    }
+    return Helper::mainEntry(action, handle, in, out);
+  }
+  OfxPluginEntryPoint* getMainEntry() override { return entry; }
+
+  void describe(OFX::ImageEffectDescriptor& desc) override {
+    loadOnce();
+    LogScope scope("recipes");
+    LOGI("describe %s (%s %d.%d)", def_.label, pluginId(def_).c_str(), def_.versionMajor, def_.versionMinor);
+    desc.setLabels(def_.label, def_.label, def_.label);
+    desc.setPluginGrouping(kGrouping);
+    desc.addSupportedContext(OFX::eContextFilter);  // decisions 4, 35
+    desc.addSupportedBitDepth(OFX::eBitDepthFloat);
+    desc.setSingleInstance(false);
+    desc.setHostFrameThreading(false);
+    desc.setSupportsMultiResolution(false);
+    desc.setSupportsTiles(false);
+    desc.setTemporalClipAccess(true);  // Jump Repair and Temporal read Source at t +- k (plugin_ml.cpp:1091)
+    desc.setRenderTwiceAlways(false);
+    desc.setSupportsMultipleClipPARs(false);
+    desc.setRenderThreadSafety(OFX::eRenderInstanceSafe);
+    desc.getPropertySet().propSetString(kOfxImageEffectPropColourManagementStyle, kOfxImageEffectColourManagementOCIO,
+                                        false);
+    desc.getPropertySet().propSetString(kOfxImageEffectPropColourManagementAvailableConfigs,
+                                        "ofx-native-v1.5_aces-v1.3_ocio-v2.3", false);
+  }
+
+  void describeInContext(OFX::ImageEffectDescriptor& desc, OFX::ContextEnum ctx) override {
+    LogScope scope("recipes");
+    try {
+      describeFromDef(desc, def_);
+      LOGI("describeInContext %s ctx=%d done", def_.label, int(ctx));
+    } catch (const std::exception& e) {
+      LOGE("describeInContext %s ctx=%d FAILED: %s [%s]", def_.label, int(ctx), e.what(), typeid(e).name());
+      throw;
+    }
+  }
+
+  OFX::ImageEffect* createInstance(OfxImageEffectHandle handle, OFX::ContextEnum) override {
+    return new RecipeEffect(handle, def_);
+  }
+
+ private:
+  const RecipeDef& def_;
+};
+
+}  // namespace
+
+namespace OFX {
+namespace Plugin {
+void getPluginIDs(OFX::PluginFactoryArray& ids) {
+  static RecipeFactory<HairLocksTag> hairLocks;
+  ids.push_back(&hairLocks);
+#if defined(ER_MUTANT_SHARED_FACTORY)
+  static RecipeFactory<HairLocksTag> dummy(TestDummy::def());  // WRONG on purpose: shares Hair Locks' class
+  ids.push_back(&dummy);
+#elif defined(ER_TEST_RECIPES)
+  static RecipeFactory<TestDummy> dummy;
+  ids.push_back(&dummy);
+#endif
+}
+}  // namespace Plugin
+}  // namespace OFX

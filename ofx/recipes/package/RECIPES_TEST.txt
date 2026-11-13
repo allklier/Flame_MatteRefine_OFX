@@ -1,0 +1,91 @@
+FLAME TEST FOR EDGE RECIPES: RELEASE PACKAGE, INSTALL AND FIRST RUN (Hair Locks)
+================================================================================
+Written 2026-11-13. About 45 minutes. On the Rocky Linux 9 Flame workstation.
+(The dev-bundle part of this sheet, the controls in depth, is written separately.)
+
+WHAT THIS TESTS
+  That the Edge Recipes package installs on its own and next to the single plugins (Matte Refine,
+  Matte Refine ML, Matte Merge), that one setup.sh covers both ML plugins, that the model step is
+  gated on its own (the other steps run without setup), and a first pass over every Hair Locks control
+  and view. Nothing here has been seen in Flame before: note anything odd, with a screenshot.
+
+BEFORE YOU START
+  - Packages: EdgeRecipes-<ver>-linux-x86_64.tar.gz and, for step C, the three single-plugin tarballs,
+    with SHA256SUMS. Check:  sha256sum -c SHA256SUMS   (every line OK).
+  - Note what is in /usr/OFX/Plugins now:  ls -l /usr/OFX/Plugins
+    A dev link (ls shows "->") to a build folder is replaced by install.sh with a copy: that is expected.
+  - Log: ~/.cache/matte-refine/logs/matte-refine.log ; runner messages: ~/.cache/matte-refine/logs/runner-stderr.log
+
+A. INSTALL ALONE, NO SETUP YET (as a user that has NOT run setup.sh, or after ./setup.sh --remove)
+  1. Quit Flame. Unpack: tar xzf EdgeRecipes-<ver>-linux-x86_64.tar.gz ; cd EdgeRecipes-<ver>-linux-x86_64
+  2. sudo ./install.sh
+     Expected: "installed /usr/OFX/Plugins/EdgeRecipes.ofx.bundle", "the nodes are under Edge Recipes",
+     the setup.sh hint. No other bundle in /usr/OFX/Plugins changed (compare with your ls).
+  3. Run sudo ./install.sh again while Flame is RUNNING: expected "NOT INSTALLED: Flame is running ...
+     Nothing was changed." Quit Flame afterwards.
+  4. Start Flame. Batch: the group "Edge Recipes" holds "Hair Locks" (and the "Matte Refine" group is
+     there only if you had the single plugins installed). Add Hair Locks.
+  5. Version label reads "ER <ver>, Hair Locks 1.0, <git>". Note the exact text.
+  6. Connect: picture to the front (red); your matte to the second socket (source alpha); a roto shape
+     around the hair to FocusRegion. Leave Detail empty.
+  7. Gate closed: the Plan column's "Model" line reads "Model: needs setup.sh"; the first Plan line
+     lists the steps that did run (e.g. Snap, Temporal). Turn Rebuild Detail on: it still works (a
+     classical step), the Plan says "Created matte: N pieces". No runner starts:
+       /usr/OFX/Plugins/EdgeRecipes.ofx.bundle/Contents/Resources/mr_ml_runner --status   -> "no runner"
+  Report: steps 2-7 as seen; screenshot of the node with the Plan column.
+
+B. SETUP (as your normal user, not root)
+  1. ./setup.sh   (licences screen, accept, "full models?" answer no)
+     If you ALREADY ran setup.sh for Matte Refine ML, expected instead: "Licences: already accepted",
+     "All files are installed and verified." and nothing downloaded: that is the shared setup.
+  2. Restart Flame. Hair Locks: "Model Small: ready" with Edge Model on; the first frame takes longer
+     (the model starts, about 1-2 s), then frames render at about 0.1-0.3 s HD (note what you see).
+  3. Runner (its own, not Matte Refine ML's):
+       /usr/OFX/Plugins/EdgeRecipes.ofx.bundle/Contents/Resources/mr_ml_runner --status
+     Expected: "runner pid ... build 'ER <ver> <git>' ...". It stops itself after 5 minutes idle.
+  4. Model Base: with --full not installed, the Plan says "Model Base: not installed" and only the model
+     step is off; the other steps still run.
+
+C. COEXISTENCE WITH PLUGINS 1-3
+  1. Quit Flame. Install each single package from its own folder: sudo ./install.sh (Matte Refine,
+     Matte Refine ML, Matte Merge). ls /usr/OFX/Plugins: four bundles.
+  2. Flame: "Matte Refine" group (Matte Refine, Matte Refine ML, Matte Merge) and "Edge Recipes" group
+     (Hair Locks), all load. One Batch with a Matte Refine ML node and a Hair Locks node, both rendering.
+  3. Two runners: Matte Refine ML's ".../MatteRefineML.ofx.bundle/Contents/Resources/mr_ml_runner --status"
+     shows build '<ML ver> <git>', Edge Recipes' shows 'ER ...'. Note GPU memory (nvidia-smi) with both.
+  4. Uninstall only Matte Refine ML: quit Flame, in its folder sudo ./install.sh --uninstall.
+     Expected: only MatteRefineML.ofx.bundle removed; Edge Recipes and the others stay; Hair Locks still
+     shows "Model Small: ready" (the models are kept).
+  5. setup.sh --remove from the Edge Recipes folder while Matte Refine ML is installed (reinstall it
+     first): expected a WARNING naming MatteRefineML.ofx.bundle, then the question. Answer n:
+     "Nothing was changed."
+  6. Reinstall Edge Recipes (sudo ./install.sh in its folder) while its runner is up (step B3 within
+     5 minutes): expected "replacing ...", and --status afterwards says no runner (it was asked to quit).
+
+D. FIRST PASS OVER HAIR LOCKS (picture, matte and Focus Region connected, setup done)
+  For each, a sentence on what changed (View = Result Matte, then the view named):
+  1. Feather %: 0, 0.25, 2. View Region shows the soft border; outside the region nothing changes
+     (View Changes: no marks outside it except Temporal's edge calming).
+  2. Edge Model on / off; Strand Gain 0.5, 1, 2 (View Candidates, red = model).
+  3. Rebuild Detail on: Plan reads "Created matte: N pieces"; View Rebuilt shows only what it added;
+     Min Confidence 0.3 / 0.45 / 0.7 changes how much.
+  4. Temporal Amount 0 / 1 while playing: edge flicker outside the region.
+  5. Snap Amount 0 / 1 inside the region.
+  6. Detail: connect a second matte (e.g. LTX Alpha Gen hair) to Detail: Plan "Detail on", View
+     Candidates shows blue.
+  7. Advanced tab: it exists, named "Advanced"; columns Jump Repair, Focus Region, Edge Model, Rebuild
+     Detail, Temporal. Turn Jump Repair on: View Jumps.
+  8. Views: step through all 8 (Result Matte, Picture, Changes, Region, Jumps, Candidates, Rebuilt,
+     Trimap); the matte output stays the result in every view.
+  9. Disconnect FocusRegion: Plan note "Connect a Focus Region"; the matte passes through except
+     Temporal outside the region.
+  Labels cut off at about 15 characters: note any you cannot read.
+
+E. LOGS
+  1. Turn Debug Logging on, render a few frames, press Collect Logs. Expected: a file
+     ~/matte-refine-support-<date>.tar.gz; Hair Locks' log lines name the node "recipes:hairlocks:<id>",
+     in the same log as the Matte Refine nodes. Send the tarball (it holds logs and system details, no images).
+
+AFTERWARDS
+  Leave everything installed if you want to keep testing. To go back: sudo ./install.sh --uninstall in
+  each package's folder removes only that package's plugin.

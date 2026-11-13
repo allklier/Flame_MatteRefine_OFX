@@ -1,0 +1,85 @@
+FLAME TEST FOR THE EDGE RECIPES PROBE ("Probe Alpha / Beta / Gamma")
+====================================================================
+Written 2026-11-12. About 30 minutes (one Flame restart, one Batch save + reload). On the Flame machine.
+
+WHAT THIS TESTS (docs/edge_recipes.md 4.9, work package 0b)
+  Edge Recipes will ship several effects ("recipes") from ONE plugin binary, each its own node in Flame's menu.
+  Before building it we need to know:
+    (1) does Flame list several effects of one binary, under the group "Edge Recipes", and does each node run ITS
+        OWN effect (not the last one loaded)?
+    (2) a node with four sockets: picture (front), matte (source alpha) and two optional mask inputs ("Detail",
+        "Focus Region", declared as in Matte Merge): how many sockets, in what order and colour, and does each
+        mask arrive Alpha-only?
+    (3) a node whose first tab is full (6 columns): does the rest go to a second tab named "Advanced", in order?
+    (4) labels set when Flame loads the plugin show up; a text line rewritten at every render ("Plan") and a
+        checkbox label rewritten at every render: does Flame show the new text?
+    (5) saved Batch: each node reloads as the same effect with its values.
+  The probe does no matte processing. Each effect tints the picture and changes the matte in its own way:
+    Probe Alpha  footer "K=101"  RGB tinted RED    matte = source alpha        2 sockets   one tab, 4 columns
+    Probe Beta   footer "K=202"  RGB tinted GREEN  matte = 1 - source alpha    4 sockets   one tab, 4 columns
+    Probe Gamma  footer "K=303"  RGB tinted BLUE   matte = 0.5 x source alpha  4 sockets   tab 1 full + "Advanced"
+  View (column Matte): Result = tinted picture, Picture = untouched front, Matte = the node's matte in RGB.
+
+SETUP (the assistant builds; you do the sudo + restart)
+  1. sudo ln -s <build folder>/EdgeRecipesProbe.ofx.bundle /usr/OFX/Plugins/      (the assistant gives the path)
+  2. Restart Flame.
+  3. Log: ~/.cache/matte-refine/logs/matte-refine.log. Probe lines carry "node=erprobe" (load) or
+     "node=erprobe:A|B|G:<id>" (a node). Follow it live:  tail -f ~/.cache/matte-refine/logs/matte-refine.log | grep erprobe
+  4. At load the log should have three lines
+       "==== Edge Recipes Probe 0.1.0 (<git>) describe Probe Alpha id=...edgerecipesprobe.alpha uid=... K=101 ===="
+     and the same for Beta (K=202) and Gamma (K=303). Missing ones = Flame did not load that effect: note it.
+
+FOOTAGE (any; nothing is measured from the pixels)
+  P = a picture, M = a matte (e.g. your roto / LTX matte), D = another matte (anything, even M again).
+
+TESTS
+  1. Menu. Open the OFX node list. Is there a group "Edge Recipes" with "Probe Alpha", "Probe Beta", "Probe Gamma"?
+     Other groups (Matte Refine etc.) unchanged? Note the exact names and their order.
+  2. Identity. Add one node of EACH effect, P on the front socket, M on the source alpha socket. For each check:
+       - the footer starts with its own name and constant: "Probe Alpha K=101 ...", "Probe Beta K=202 ...",
+         "Probe Gamma K=303 ...";
+       - the picture is tinted red / green / blue respectively (View = Result);
+       - View = Matte: Alpha shows M, Beta shows M inverted, Gamma shows M at half brightness;
+       - the Strength slider is labelled "Probe Alpha Strength" / "Probe Beta Strength" / "Probe Gamma Strength"
+         with defaults 0.40 / 0.50 / 0.60; the Plan column's "Described" line reads "described as Probe <name>".
+     Any node showing another effect's name, constant, tint or labels = the bug this probe looks for: note which.
+  3. Sockets (Beta and Gamma). Count the input sockets, their colours and order (picture red, matte blue ...?).
+     Connect D to the 3rd socket, then also to the 4th. After each connection note the footer, e.g.
+       "Probe Beta K=202 | f12 | Source 4ch 0,0-1920,1080 | Detail 1ch 0,0-1920,1080 | Focus off | id 1a2b3c4d | S 0.50 E1 M1 V0"
+     "1ch" = Alpha-only (expected for a mask), "4ch" = RGBA, "off" = not connected, "no image" = connected but
+     Flame gave nothing. The numbers after "ch" are the image bounds. Which socket is "Detail" and which "Focus"?
+     Disconnect them one at a time and note the footer. Alpha has only 2 sockets: confirm.
+  4. Tabs (Gamma). Tab 1 should have 6 columns: Matte · Probe Gamma Main · Gamma Main (cont.) · Plan · Model & Colour ·
+     Support. Is there a second tab, and is it named "Advanced", with the columns "Advanced A" (G Adv Value A,
+     G Adv Switch B, G Adv Choice C) and "Advanced B" (G Adv Value D, G Adv Switch E) in that order? Any third tab or
+     empty column (the hidden node id sits in Support)? Alpha and Beta: one tab, 4 columns.
+  5. Runtime text (all three). Scrub to a few frames. In column Plan:
+       - "Plan" should read e.g. "B f12 S0.50 D1 F-" (effect letter, frame, Strength, Detail / Focus channels or "-")
+         and follow the frame you are on;
+       - the checkbox below it was labelled "Label set at describe"; after a render its label should read
+         "Seen at f12" (the frame). Does Flame show the new label, only after a refresh, or never?
+       - "Version" reads "ERP 0.1.0 A|B|G 0.1 <git>".
+     Note for each: updates at once / after clicking elsewhere / never.
+  6. Saved Batch. On each node change some values away from the defaults (Strength, Enable Tint, Mode, View; on
+     Gamma also two Advanced controls) and write down each footer ("... id <8 hex> | S .. E. M. V. | Adv ..."). Save
+     the Batch, close it (or restart Flame), reload it. Each node should come back as the same effect (same name,
+     constant, tint) with the same values and the SAME id in its footer. In the log: "createInstance ... nodeId <id>
+     (restored)" (a new node says "(new)").
+  7. Delete one Gamma node and add a new one: defaults again and a new id (expected).
+  Then send the log lines with "erprobe" in them (or Collect Logs from a Matte Refine node).
+
+WHAT TO TELL THE ASSISTANT
+  | Question                                   | Answer to write down                                             |
+  |--------------------------------------------|------------------------------------------------------------------|
+  | (1) menu                                   | group name, the three effect names, their order                  |
+  | (1) each node its own effect               | yes / which node showed which K, tint, labels                    |
+  | (2) sockets, Beta / Gamma                  | count, colours, order; which is Detail, which Focus Region       |
+  | (2) mask delivery                          | footer "Detail ?ch", "Focus ?ch" (1ch expected); bounds          |
+  | (3) Gamma tabs                             | tab 1 columns; 2nd tab name; Advanced columns in order; extras   |
+  | (4) Plan text / relabelled checkbox        | updates at once / after a refresh / never (each)                 |
+  | (5) saved Batch                            | each node same effect + values + id after reload: yes / no       |
+  | anything odd                               | red node, error popup, a crash, a missing effect                 |
+
+AFTERWARDS
+  sudo rm /usr/OFX/Plugins/EdgeRecipesProbe.ofx.bundle, restart Flame. Batches with probe nodes will then show
+  missing plugins: delete those nodes or the Batch. The probe is a test tool only: not packaged, not shipped.
