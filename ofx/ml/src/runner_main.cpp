@@ -224,6 +224,17 @@ void usage() {
       "  mr_ml_runner --version\n");
 }
 
+// This runner's build id: plugin 2's (runnerBuildId(), MRML_BUILD_ID of mr_ml_client) unless the target defines
+// MRML_RUNNER_BUILD_ID: Edge Recipes' own runner (docs/edge_recipes.md 1.3), so the two plugins never share or
+// replace each other's runner process (the socket is named after the id, runner_ipc.cpp socketName).
+const char* buildId() {
+#ifdef MRML_RUNNER_BUILD_ID
+  return MRML_RUNNER_BUILD_ID;
+#else
+  return runnerBuildId();
+#endif
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -233,6 +244,7 @@ int main(int argc, char** argv) {
   logConfigure();
   LogScope scope("runner");
   ServerOptions o;
+  o.buildId = buildId();
   std::vector<std::string> rest;
   std::string err;
   if (!parseServerArgs(argc, argv, &o, &rest, &err)) {
@@ -248,7 +260,7 @@ int main(int argc, char** argv) {
     } else if (a == "--status" || a == "--quit") {
       cmd = a.substr(2);
     } else if (a == "--version") {
-      std::printf("mr_ml_runner %s, protocol %u, ONNX Runtime %s\n", runnerBuildId(), proto::kVersion,
+      std::printf("mr_ml_runner %s, protocol %u, ONNX Runtime %s\n", buildId(), proto::kVersion,
                   ortVersion().c_str());
       return 0;
     } else {
@@ -257,12 +269,12 @@ int main(int argc, char** argv) {
     }
   }
   if (!cmd.empty()) {
-    if (o.socketPath.empty()) o.socketPath = ipc::defaultSocketPath(&err, runnerBuildId());
+    if (o.socketPath.empty()) o.socketPath = ipc::defaultSocketPath(&err, buildId());
     if (o.socketPath.empty()) {
       std::fprintf(stderr, "mr_ml_runner: %s\n", err.c_str());
       return 1;
     }
-    return controlMain(cmd, o.socketPath);
+    return controlMain(cmd, o.socketPath, buildId());
   }
   reexecWithLibraryPath(argv);
   OrtEngine engine(retryMs);

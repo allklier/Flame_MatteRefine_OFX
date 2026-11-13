@@ -17,7 +17,7 @@ THE QUESTIONS (answers come from the log lines, ~/.cache/matte-refine/logs/matte
   4. Does changing something on frame t+1 upstream make frame t render again (cache)?
 
 TESTS
-  A. Synthetic: ~/MatteRefine_build/demo/ml/temporal_rgb.0000-0008.exr (picture) and temporal_matte.0000-0008.exr (matte),
+  A. Synthetic: ~/ClaudeCode/MatteRefine_build/demo/ml/temporal_rgb.0000-0008.exr (picture) and temporal_matte.0000-0008.exr (matte),
      9-frame sequences (import each as a clip; picture on the front, matte on the second socket).
      Temporal OFF: the edge jitters and speckles every frame, a hole in the torso flickers.
      Temporal ON (+-1): the edge flicker should drop by about half (core numbers: -56 %), holes mostly stay.

@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <stdexcept>
 #include <utility>
@@ -33,6 +35,26 @@ SmartFillParams smartFillParams(const SmartFillUi& ui, double renderScale) {
 }
 
 int temporalK(int framesIndex) { return framesIndex == kTemporal2 ? 2 : 1; }
+
+int jumpSpan(int spanIndex) { return spanIndex == kJumpSpan2 ? 2 : spanIndex == kJumpSpan3 ? 3 : 1; }
+
+JumpParams jumpParams(const JumpUi& ui) {
+  JumpParams p;
+  p.threshold = std::min(std::max(ui.threshold, 0.0), 1.0);
+  p.minSizePercent = std::max(ui.minSizePercent, 0.0);
+  p.maxSpan = jumpSpan(ui.span);
+  p.motionGuard = ui.guards;
+  return p;
+}
+
+int jumpSpanIndex(double frames) {
+  const long f = std::lround(frames);  // NaN or out of range: clamped
+  return f >= 3 ? kJumpSpan3 : f == 2 ? kJumpSpan2 : kJumpSpan1;
+}
+
+int neighbourReach(bool temporal, int temporalFrames, bool jumpRepair, int jumpSpanIndex) {
+  return std::max(temporal ? temporalK(temporalFrames) : 0, jumpRepair ? jumpReach(jumpSpan(jumpSpanIndex)) : 0);
+}
 
 StabiliseParams temporalParams(const TemporalUi& ui, double renderScale) {
   StabiliseParams p;
@@ -102,7 +124,7 @@ void collectNeighbours(double t, int K, const FrameRange& r, int w, int h, const
     } else if (f.w != w || f.h != h) {
       std::snprintf(b, sizeof b, "size %dx%d, centre %dx%d", f.w, f.h, w, h);
       rep.status = b;
-    } else if (f.matte.size() != n || f.rgb.size() != 3 * n) {
+    } else if (f.matte.size() != n || (!f.matteOnly && f.rgb.size() != 3 * n)) {
       rep.status = "no pixels";
     } else {
       rep.status = "used";
@@ -125,8 +147,10 @@ void runTemporal(const float* matte, const float* rgb, int w, int h, const Stabi
   *aborted = false;
   if (stats) *stats = StabiliseStats();
   if (nb.offsets.size() != nb.frames.size()) throw std::invalid_argument("Temporal: neighbour list mismatch");
+  auto used = [&](size_t i) { return std::abs(nb.offsets[i]) <= p.frames; };  // farther ones: Jump Repair's
   for (size_t i = 0; i < nb.frames.size(); ++i) {
     const FetchedFrame& f = nb.frames[i];
+    if (!used(i)) continue;
     if (nb.offsets[i] == 0 || f.matte.size() != n || f.rgb.size() != 3 * n) {
       char b[128];
       std::snprintf(b, sizeof b, "Temporal: neighbour %+d has no %dx%d matte and picture", nb.offsets[i], w, h);
@@ -140,16 +164,35 @@ void runTemporal(const float* matte, const float* rgb, int w, int h, const Stabi
   }
   std::vector<TemporalFrame> frames;
   for (size_t i = 0; i < nb.frames.size(); ++i)
-    if (nb.offsets[i] < 0) frames.push_back({nb.frames[i].rgb.data(), nb.frames[i].matte.data()});
+    if (used(i) && nb.offsets[i] < 0) frames.push_back({nb.frames[i].rgb.data(), nb.frames[i].matte.data()});
   const int centre = int(frames.size());
   frames.push_back({rgb, matte});
   for (size_t i = 0; i < nb.frames.size(); ++i)
-    if (nb.offsets[i] > 0) frames.push_back({nb.frames[i].rgb.data(), nb.frames[i].matte.data()});
+    if (used(i) && nb.offsets[i] > 0) frames.push_back({nb.frames[i].rgb.data(), nb.frames[i].matte.data()});
   stabilise(frames.data(), int(frames.size()), centre, w, h, p, out, stats);
   if (abort && abort()) {
     *aborted = true;
     if (out != matte && n) std::copy(matte, matte + n, out);
   }
+}
+
+void runJumpRepair(const float* matte, int w, int h, const JumpParams& p, const Neighbours& nb, float* out,
+                   JumpStats* stats, std::vector<uint8_t>* marks) {
+  const size_t n = size_t(std::max(w, 0)) * size_t(std::max(h, 0));
+  if (nb.offsets.size() != nb.frames.size()) throw std::invalid_argument("Jump Repair: neighbour list mismatch");
+  const float* frames[2 * kJumpReach + 1] = {nullptr};
+  frames[kJumpReach] = matte;
+  for (size_t i = 0; i < nb.frames.size(); ++i) {
+    const int k = nb.offsets[i];
+    if (k == 0 || std::abs(k) > kJumpReach) continue;
+    if (nb.frames[i].matte.size() != n) {
+      char b[128];
+      std::snprintf(b, sizeof b, "Jump Repair: neighbour %+d has no %dx%d matte", k, w, h);
+      throw std::invalid_argument(b);
+    }
+    frames[k + kJumpReach] = nb.frames[i].matte.data();
+  }
+  repairJumps(frames, w, h, p, out, stats, marks);
 }
 
 void RunnerSeg::segment(const float* rgb, int w, int h, float* mask) {
@@ -171,17 +214,38 @@ void RunnerSeg::segment(const float* rgb, int w, int h, float* mask) {
 void runChain(const float* matte, const float* rgb, int w, int h, const ChainParams& p, SegRunner& seg,
               TileRunner& tiles, std::vector<float>* mid, std::vector<float>* out, ChainResult* r,
               const std::function<bool()>& abort, std::vector<float>* trimapOut, const std::function<void()>& between,
-              std::vector<float>* temporalOut) {
+              std::vector<float>* temporalOut, std::vector<float>* jumpOut, std::vector<uint8_t>* jumpMarks) {
   const size_t n = size_t(std::max(w, 0)) * size_t(std::max(h, 0));
   *r = ChainResult();
-  const float* in = matte;  // Smart Fill's input: Temporal's output when it ran
+  const Neighbours none;
+  const float* centre = matte;  // Temporal's input: Jump Repair's output when it ran
+  std::vector<float> jr;
+  if (jumpMarks) jumpMarks->assign(n, kJumpNone);
+  if (p.jumpRepair) {
+    r->jRan = true;
+    if (abort && abort()) {
+      r->jAborted = true;  // passes the matte through
+    } else {
+      jr.resize(n);
+      try {
+        runJumpRepair(matte, w, h, jumpParams(p.jr), p.neighbours ? *p.neighbours : none, jr.data(), &r->jr,
+                      jumpMarks);
+        centre = jr.data();
+      } catch (const std::exception& e) {
+        r->jFailed = true;  // the step passes the matte through
+        r->jError = e.what();
+        if (jumpMarks) jumpMarks->assign(n, kJumpNone);
+      }
+    }
+  }
+  if (jumpOut) jumpOut->assign(centre, centre + n);
+  const float* in = centre;  // Smart Fill's input: Temporal's output when it ran
   std::vector<float> tm;
   if (p.temporal) {
     r->tRan = true;
     tm.resize(n);
     try {
-      const Neighbours none;
-      runTemporal(matte, rgb, w, h, temporalParams(p.tm, p.renderScale), p.neighbours ? *p.neighbours : none,
+      runTemporal(centre, rgb, w, h, temporalParams(p.tm, p.renderScale), p.neighbours ? *p.neighbours : none,
                   tm.data(), &r->tm, &r->tAborted, abort);
       in = tm.data();
     } catch (const std::exception& e) {

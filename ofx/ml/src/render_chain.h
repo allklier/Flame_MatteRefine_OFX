@@ -1,6 +1,6 @@
 // The render chain of Matte Refine ML without OFX (plugin_ml.cpp calls it; the tests run it with
-// fakes): matte -> Temporal (B4, temporal.h) -> Smart Fill (B3, smart_fill.h) -> Edge Refine (B1,
-// edge_refine.h), each step only when enabled, the order fixed (definition order = chain order, root
+// fakes): matte -> Jump Repair (jump_repair.h) -> Temporal (B4, temporal.h) -> Smart Fill (B3,
+// smart_fill.h) -> Edge Refine (B1, edge_refine.h), each step only when enabled, the order fixed (definition order = chain order, root
 // decision 19). C++14.
 //
 // A step that throws (no runner, no model, a model error, a timeout) passes its input through
@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "edge_refine.h"
+#include "jump_repair.h"
 #include "smart_fill.h"
 #include "temporal.h"
 
@@ -63,6 +64,25 @@ struct TemporalUi {
 // Refine's Band px); the rest the core's defaults (Median, holes on, flow at <= 600 lines).
 StabiliseParams temporalParams(const TemporalUi& ui, double renderScale);
 
+// --- Jump Repair --------------------------------------------------------------------------------
+// Span: an index stored in setups (append only): "1 frame", "1-2 frames", "1-3 frames".
+enum JumpSpan { kJumpSpan1 = 0, kJumpSpan2 = 1, kJumpSpan3 = 2 };
+int jumpSpan(int spanIndex);  // 1-3; an unknown index: 1
+struct JumpUi {
+  double threshold = 0.5;          // "Jump Above"
+  double minSizePercent = 0.0125;  // "Min Size %" of the frame area
+  int span = kJumpSpan1;           // "Span" (the node shows it as a number of frames: spanIndex())
+  bool guards = true;              // "Motion Guards": the core's Moved / Turning / Not still checks
+};
+// The node's "Span" number (whole frames 1-3, a 1-row control) as the JumpSpan index.
+int jumpSpanIndex(double frames);
+// The core's params (motionGuard = guards): no pixel param to scale (Min Size is a share of the frame area, the repair
+// zone follows the frame's height, so a proxy render gets the same decisions); agree 0.15.
+JumpParams jumpParams(const JumpUi& ui);
+// The neighbour frames the enabled steps need on each side (0: none): Temporal's K, Jump Repair's
+// reach (Span + 1: the guards look one frame beyond the references).
+int neighbourReach(bool temporal, int temporalFrames, bool jumpRepair, int jumpSpanIndex);
+
 // The Source clip's frame range as the host reports it (getFrameRange); valid false = unknown: no
 // clamping (a time the host has no image for is then a failed fetch).
 struct FrameRange {
@@ -79,6 +99,7 @@ void framesNeededRange(double t, int K, const FrameRange& r, double* lo, double*
 // One neighbour as the host returned it; the plugin's fetcher fills it from an OFX::Image.
 struct FetchedFrame {
   bool image = false;   // an image came back (false: null, or the fetch threw: error)
+  bool matteOnly = false;  // the fetcher filled only the matte (a neighbour only Jump Repair uses)
   std::string error;    // what the fetch threw
   int w = 0, h = 0, components = 0;
   bool isFloat = false;
@@ -105,23 +126,31 @@ struct Neighbours {
   bool aborted = false;
 };
 // Fetches every offset of neighbourOffsets(t, K, r) and keeps the usable ones: an image, float, 4
-// channels (the matte is the alpha, decision 35), the centre's size w x h, rgb and matte filled.
+// channels (the matte is the alpha, decision 35), the centre's size w x h, matte filled and rgb too
+// unless the fetcher marked it matteOnly.
 // abort() is asked before each fetch (aborted: the rest are not fetched).
 void collectNeighbours(double t, int K, const FrameRange& r, int w, int h, const FrameFetcher& fetch, Neighbours* nb,
                        const std::function<bool()>& abort = std::function<bool()>());
-// Temporal on the centre (matte, rgb: w*h, w*h*3) with the neighbours: stabilise() on the frames in
-// time order (neighbours before, the centre, after; a missing neighbour closes up, so a lone -2 gets
-// the -1 weight). Throws std::invalid_argument for a neighbour whose matte or picture is not w*h.
+// Temporal on the centre (matte, rgb: w*h, w*h*3) with the neighbours within K = p.frames (farther
+// ones, fetched for Jump Repair, are ignored): stabilise() on the frames in time order (neighbours
+// before, the centre, after; a missing neighbour closes up, so a lone -2 gets the -1 weight). Throws std::invalid_argument for a neighbour whose matte or picture is not w*h.
 // abort() is asked before and after the core (it has no abort of its own): aborted -> out = matte.
 // out: w*h.
+// Jump Repair on the centre with the neighbours' mattes (offsets within kJumpReach; the rest
+// ignored). Throws std::invalid_argument for a neighbour whose matte is not w*h. out: w*h; marks
+// (optional): the View "Jumps" marks.
+void runJumpRepair(const float* matte, int w, int h, const JumpParams& p, const Neighbours& nb, float* out,
+                   JumpStats* stats, std::vector<uint8_t>* marks = nullptr);
 void runTemporal(const float* matte, const float* rgb, int w, int h, const StabiliseParams& p, const Neighbours& nb,
                  float* out, StabiliseStats* stats, bool* aborted,
                  const std::function<bool()>& abort = std::function<bool()>());
 
 struct ChainParams {
+  bool jumpRepair = false;
+  JumpUi jr;
   bool temporal = false;
   TemporalUi tm;
-  const Neighbours* neighbours = nullptr;  // Temporal's neighbour frames (nullptr: none)
+  const Neighbours* neighbours = nullptr;  // Jump Repair's and Temporal's neighbour frames (nullptr: none)
   bool smartFill = false;
   SmartFillUi sf;
   double renderScale = 1.0;  // Temporal's and Smart Fill's pixel params (Edge Refine's band: er.bandPx, scaled by the caller)
@@ -130,6 +159,9 @@ struct ChainParams {
 };
 
 struct ChainResult {
+  bool jRan = false, jFailed = false, jAborted = false;  // jRan: enabled and called
+  std::string jError;
+  JumpStats jr;
   bool tRan = false, tFailed = false, tAborted = false;  // tRan: enabled and called (also with no neighbours)
   std::string tError;
   StabiliseStats tm;
@@ -141,7 +173,9 @@ struct ChainResult {
   RefineStats er;
 };
 
-// temporalOut (if given) = Temporal's output (= Smart Fill's input; the matte when Temporal is off or
+// jumpOut (if given) = Jump Repair's output (= Temporal's input; the matte when Jump Repair is off or
+// failed), jumpMarks (if given) its View "Jumps" marks (all none when it did not run);
+// temporalOut (if given) = Temporal's output (= Smart Fill's input; Temporal's input when it is off or
 // failed), mid = Smart Fill's output (= Edge Refine's input; Smart Fill's input when it is off or
 // failed), out = the chain's result; all resized to w*h. abort as the cores define it; between() is
 // called after Smart Fill, before Edge Refine (the plugin reads and resets the runner client's stats).
@@ -149,7 +183,8 @@ void runChain(const float* matte, const float* rgb, int w, int h, const ChainPar
               TileRunner& tiles, std::vector<float>* mid, std::vector<float>* out, ChainResult* r,
               const std::function<bool()>& abort = std::function<bool()>(), std::vector<float>* trimapOut = nullptr,
               const std::function<void()>& between = std::function<void()>(),
-              std::vector<float>* temporalOut = nullptr);
+              std::vector<float>* temporalOut = nullptr, std::vector<float>* jumpOut = nullptr,
+              std::vector<uint8_t>* jumpMarks = nullptr);
 
 // --- View "Holes" (QC) -------------------------------------------------------------------------
 enum HoleMark : uint8_t { kMarkNone = 0, kMarkFilled = 1, kMarkKept = 2 };
@@ -175,6 +210,17 @@ inline void changesViewRgb(float m, float a, float* rgb) {
   } else {
     rgb[0] = rgb[2] = a;
     rgb[1] = std::min(1.0f, a - d);
+  }
+}
+
+// View "Jumps": Jump Repair's input m in grey with what it raised magenta and lowered green (the
+// Changes colours), the blobs it kept (motion) red.
+inline void jumpsViewRgb(uint8_t mark, float m, float a, float* rgb) {
+  if (mark == kJumpKept) {
+    rgb[0] = 1.0f;
+    rgb[1] = rgb[2] = 0.0f;
+  } else {
+    changesViewRgb(m, a, rgb);
   }
 }
 

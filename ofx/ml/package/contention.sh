@@ -8,7 +8,7 @@
 # Output: $B/contention/{timeline.log,gpu.csv,marks.log,stderr.txt}. One loop iteration = one process:
 # session creation, then 30 frames (ViTMatte-small, CUDA, tile 512, all tiles of the frame one after
 # another, like an inline plugin would), median reported. See ofx/ml/CLAUDE.md "Phase 0".
-B=${MLBENCH:-$HOME/MatteRefine_build/mlbench}
+B=${MLBENCH:-$HOME/ClaudeCode/MatteRefine_build/mlbench}
 D=$B/data
 ORT=$D/ort/onnxruntime-linux-x64-gpu_cuda13-1.31.0
 BENCH=$B/repo/build_ml/ofx/ml/mr_ml_bench

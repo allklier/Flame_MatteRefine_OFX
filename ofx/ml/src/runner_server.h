@@ -68,7 +68,7 @@ constexpr uint64_t kStderrCapBytes = uint64_t(5) << 20;
 int serve(const ServerOptions& o, Engine& engine);
 
 // "status" / "quit" against the runner at socket: prints a report, returns 0 / 1.
-int controlMain(const std::string& cmd, const std::string& socket);
+int controlMain(const std::string& cmd, const std::string& socket, const std::string& buildId = "");  // "" = runnerBuildId()
 
 }  // namespace ml
 }  // namespace mr

@@ -2,7 +2,7 @@ FLAME CONTENTION TEST FOR MATTE REFINE ML (ViTMatte, phase 0)
 =============================================================
 Written 2026-10-23. Takes about 12 minutes. Do it on akflame5, in a terminal there:
 
-    cd ~/MatteRefine_build/mlbench
+    cd ~/ClaudeCode/MatteRefine_build/mlbench
 
 WHAT THIS TESTS
   A benchmark loop runs ViTMatte frames on the GPU continuously in the background (harder than a
@@ -50,11 +50,11 @@ NOTES TO WRITE DOWN (fill in, then give them to the assistant together with this
   UHD pass (optional):  same questions
 
 RESULTS (written automatically)
-  ~/MatteRefine_build/mlbench/contention/timeline.log   one line per loop pass: epoch + the tool's
+  ~/ClaudeCode/MatteRefine_build/mlbench/contention/timeline.log   one line per loop pass: epoch + the tool's
                                                         JSON (frame_ms_median, frame_ms_p95, ...)
-  ~/MatteRefine_build/mlbench/contention/gpu.csv        every second: time, GPU utilisation %, MiB used
-  ~/MatteRefine_build/mlbench/contention/marks.log      your phase marks with epoch times
-  ~/MatteRefine_build/mlbench/contention/stderr.txt     warnings from ONNX Runtime
+  ~/ClaudeCode/MatteRefine_build/mlbench/contention/gpu.csv        every second: time, GPU utilisation %, MiB used
+  ~/ClaudeCode/MatteRefine_build/mlbench/contention/marks.log      your phase marks with epoch times
+  ~/ClaudeCode/MatteRefine_build/mlbench/contention/stderr.txt     warnings from ONNX Runtime
 
 WHAT HAPPENS NEXT
   Tell the assistant "contention test done" with your notes. It reads the three logs, compares the
@@ -63,6 +63,6 @@ WHAT HAPPENS NEXT
   results"). Then: decision 28 (inline vs worker) can be made on measured data.
 
 FILES
-  The script: ofx/ml/package/contention.sh in the repo (copy on akflame5: ~/MatteRefine_build/mlbench/
-  contention.sh). It writes only under ~/MatteRefine_build/mlbench/contention.
+  The script: ofx/ml/package/contention.sh in the repo (copy on the test machine: <build folder>/mlbench/
+  contention.sh). It writes only under ~/ClaudeCode/MatteRefine_build/mlbench/contention.
   Context: ofx/ml/CLAUDE.md (plan, decisions 27-31, Phase 0 results for BFD and akflame5).

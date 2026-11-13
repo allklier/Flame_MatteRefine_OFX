@@ -14,7 +14,7 @@ Downloads (fetch.sh checks every sha256; nothing comes from the developer's mach
   Licences: ONNX Runtime MIT; BiRefNet MIT; ViTMatte card says apache-2.0 but is "trained on
     Composition-1k" (Adobe data, non-commercial terms): evaluation only until decided.
 
-akflame5 (Rocky 9, GCC 11): rsync the repo copy (e.g. to ~/MatteRefine_build/mlbench; check
+The test machine (Rocky 9, GCC 11): rsync the repo copy (e.g. to <build folder>/mlbench; check
 /home's free space first: ~3.5 GB for the downloads, or put them on another disk), then
   D=<download dir>; package/fetch.sh $D
   package/build_rocky9.sh <repo copy> $D/ort/onnxruntime-linux-x64-gpu_cuda13-1.31.0

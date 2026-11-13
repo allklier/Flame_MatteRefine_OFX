@@ -1,7 +1,7 @@
 SYNTHETIC SCENES TEST (Matte Refine ML): scenes with known answers, like plugin 1's
 ===================================================================================
-Written 2026-10-23. Files on akflame5:  ~/MatteRefine_build/demo/ml/   (1920x1080 float EXR, 666 MB)
-Older scenes (coarse, eroded, mixed_edge, fgcolor, all, holes ...) are in ~/MatteRefine_build/demo/ .
+Written 2026-10-23. Files on the test machine:  <build folder>/demo/ml/   (1920x1080 float EXR, 666 MB)
+Older scenes (coarse, eroded, mixed_edge, fgcolor, all, holes ...) are in ~/ClaudeCode/MatteRefine_build/demo/ .
 Import a pair into Flame, wire as always: PICTURE (xxx_rgb.exr) on the front socket, MATTE (xxx_matte.exr, grey RGB)
 on the second socket. xxx_truth.exr is the right answer to compare against in the viewer (Wipe / Difference).
 
@@ -33,7 +33,7 @@ SCENE 3  temporal   (tests Temporal Stabilise, B4: AFTER the Temporal build is d
   A figure moves and rotates slightly; the matte has fresh edge jitter and speckle every frame and a hole that
   flickers on about half the frames. Expect Temporal ON (+-1 frame): edge flicker about 55 % lower, hole mostly left.
 
-QUICK REGRESSION  coarse, eroded, mixed_edge, fgcolor in ~/MatteRefine_build/demo/ with Edge Refine ON: the model must only
+QUICK REGRESSION  coarse, eroded, mixed_edge, fgcolor in ~/ClaudeCode/MatteRefine_build/demo/ with Edge Refine ON: the model must only
   touch the band (View = Changes): coarse should land near its truth (band error 0.22 -> 0.03).
 
 Report: for each scene say what you saw (counts of green / red holes, strands visible, any footer or error).
