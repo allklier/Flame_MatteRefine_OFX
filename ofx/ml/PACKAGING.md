@@ -48,3 +48,26 @@ changed to `~/.local/share/matte-refine-ml/models`.
 - Not yet verified: real Hugging Face / PyPI downloads from Rocky 9 (trial running 2026-10-24), the install under `sudo`
   (the `sudo -H -u $SUDO_USER` runner stop), the macOS path of `install.sh`, and the dropdown labels in Flame.
 - `ofx/ml/package/build_rocky9.sh` builds only the benchmark tool; it is not the release build (`package_release.sh` is).
+
+## Edge Recipes (decision 41, `docs/edge_recipes.md` 1.3; Linux only)
+- **Tarball** `EdgeRecipes-<ER_VERSION>-linux-x86_64.tar.gz` (`ER_VERSION` in `ofx/recipes/plugin/CMakeLists.txt`): only
+  `EdgeRecipes.ofx.bundle` (the `.ofx` with every method linked, `Resources/mr_ml_runner`, `Resources/lib/` = ORT + CUDA
+  provider, `Resources/licences.txt`), `install.sh`, `setup.sh`, `licences.txt` (the same file as plugin 2's: one acceptance),
+  `README.txt` (`ofx/recipes/package/README.txt`), `THIRD_PARTY/`, README, LICENSE, USERGUIDE and images. The three solo
+  tarballs are unchanged and stay installable alone or next to it.
+- **Own runner build id.** The id is compared at the handshake and names the socket (`runner-<FNV hash of id>.sock`,
+  `runner_ipc.cpp` socketName). Plugin 2's is `"<MRML_VERSION> <git>"` (`MRML_BUILD_ID` on `mr_ml_client`); Edge Recipes'
+  is `"ER <ER_VERSION> <git>"` (`ER_RUNNER_BUILD_ID`): its runner is the same source built by `mrml_runner(er_ml_runner
+  <bundle> <id>)` (`ofx/ml/CMakeLists.txt`; `runner_main.cpp` buildId(), also used by `--status` / `--quit`), and its `.ofx`
+  sets `RunnerClientOptions::buildId` to the same id. So the two plugins run separate runner processes and never quit or
+  replace each other's runner on a mismatch. `package_release.sh` checks both runners' `--version` ids, both RPATHs
+  (`$ORIGIN/lib` only) and ORT files, and runs `check_bundle_deps.sh` on `EdgeRecipes.ofx`.
+- **install.sh** installs and `--uninstall`s only the bundles next to it (every package can be removed alone; with no
+  bundle next to it, it refuses); before replacing or removing a bundle that has `Contents/Resources/mr_ml_runner` it asks
+  that runner to quit (plugin 2's and Edge Recipes' alike).
+- **setup.sh** is shared: same models folder, keys and licence hash. `--remove` warns (and asks, unless `-y`) when another
+  bundle using the files (`MatteRefineML.ofx.bundle` / `EdgeRecipes.ofx.bundle` not shipped next to the script) is in
+  `/usr/OFX/Plugins` (test-only override `MRML_SETUP_PLUGINS_DIR`).
+- **Gate:** per step (only the model step; `docs/edge_recipes.md` 4.6), unlike plugin 2's whole-plugin gate.
+- Not yet verified: the Rocky 9 release build of this tarball and its trial install (only a local dry run with a CPU ORT
+  and a dummy CUDA provider), and anything in Flame.
