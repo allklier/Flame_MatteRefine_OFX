@@ -96,8 +96,80 @@ double flicker(const Sequence& s, const std::vector<std::vector<float>>& mattes,
 // bandError: mean |m_t - truth_t| over the band of all frames.
 double bandError(const Sequence& s, const std::vector<std::vector<float>>& mattes, double bandPx);
 
+// Jump Repair (ofx/ml/src/jump_repair.h): 20 frames of clean mattes with legitimate motion and
+// injected short jumps. Design units at 1080 lines, origin = frame centre, 2 px edges. Legitimate
+// (in truth and matte): the figure moving right 6 px a frame (from x -250); a static rounded box
+// (centre (600, 250), half size 150); a fast disc (r 16, y -480, x = -900 + 80 t: 5 diameters a
+// frame); a swinging bar (r 18, from (850, 520) upwards, length 200 + 90 cos(2 pi t / 8): longest at
+// t = 0, 8, 16, shortest at 4, 12). Jumps (matte only, discs): (0) added r 20 at (300, -300), frame
+// 3; (1) removed r 22 at (600, 250) (in the box), frame 5; (2) added r 18 straddling the moving
+// figure's outer edge (right arm, y -40), frame 7; (3) added r 20 at (-600, -420), frames 10-11; (4) removed r
+// 24 at (600, 250), frames 14-16. jitterPx > 0 adds per-frame edge jitter (+- jitterPx at 1080, 18 px
+// features) to the matte. rimPx > 0 gives every jump a soft rim (a hallucination's falloff): beyond the
+// disc's radius r its alpha is exp(-4.5 ((d - r) / rimPx)^2) (0.5 at 0.39 rimPx, 0.011 at rimPx; rimPx
+// at 1080, scaled with h); 0 = the 2 px edge (the default, unchanged). legit[t]: the fast disc's and the
+// bar's pixels at frame t, grown by 3 px.
+struct JumpDefect {
+  int first = 0, last = 0;        // frames
+  double cx = 0, cy = 0, r = 0;   // pixels, row 0 = top
+  bool added = true;
+};
+struct JumpSequence {
+  int w = 0, h = 0, frames = 0;
+  std::vector<std::vector<float>> matte, truth;  // per frame, w*h
+  std::vector<JumpDefect> defects;
+  std::vector<std::vector<uint8_t>> legit;       // per frame, w*h
+};
+JumpSequence makeJumpSequence(int w, int h, double jitterPx = 0.0, unsigned seed = 1, double rimPx = 0.0);
+
 // Uncompressed scanline OpenEXR, 32-bit float channels: 1 channel = "Y", 3 = "R G B",
 // 4 = "R G B A"; data w*h*channels, interleaved, row 0 = top. Returns false on an I/O error.
 bool writeExr(const std::string& path, int w, int h, int channels, const std::vector<float>& data);
+
+// Edge Recipes WP6 (strand presence vote, docs/edge_recipes.md section 6): a hair-locks SEQUENCE in the
+// style of the strand tracer's scenes (docs/strand_tracing.md section 4): a dark hair-mass head
+// silhouette over a static skin-like background, moving, turning and skewing, with two locks leaving its
+// right edge over the background: lock 0 one 3 px strand, lock 1 a pair of 2.5 px strands with a 2 px
+// gap (centres 4.5 px apart). Design units at 562 lines (k = h / 562 scales the head, motion and lock
+// lengths; strand widths stay in frame px). Linear RGB. Per frame t, motion[t] maps a frame-0 point
+// (frame px) to frame t: about the head centre, rotation 0.8 deg, x skew 0.01 and translation (1.8,
+// -0.5) k px per frame. base: the head silhouette (soft 1 px edge), without the locks; with
+// baseJitterPx > 0 its edge moves by up to +-baseJitterPx per frame (independent between frames, the
+// matte noise Temporal is for). region: one soft roto shape per lock that follows the motion (14 k px
+// around the lock's centreline, root inside the head, 5 k px feather). strandTruth: the locks' coverage
+// outside the head (the alpha a rebuild should add). Sensor noise (0.6 %) is independent per frame.
+// Injected flicker (all off by default; a frame index < 0 = off):
+//   dipFrame       lock 0 drawn at dipContrast of its darkness on that frame (its tracer confidence dips
+//                  below the keep bar; truth unchanged). Measured with the WP3 tracer: contrast 0.30 -> conf
+//                  1.04, 0.25 -> 0.87, 0.22 -> 0.73, <= 0.20 -> not seeded at all: the tracer's confidence
+//                  falls off a cliff (seed bar) rather than gradually, so the default 0.20 makes it a dropout
+//   vanishFrame    lock 1 drawn at vanishContrast (about invisible: the tracer loses it; truth unchanged)
+//   spuriousFrame  a 22 px, 2.5 px wide hair-coloured stroke next to lock 1 (9.5 px from its middle),
+//                  on that frame only, not anchored; not hair: not in strandTruth, marked in `spurious`
+//   flowFailFrame  that frame's picture gets a flash (x flashGain) and strong per-pixel noise, so an
+//                  optical flow to or from it fails (truth unchanged)
+struct LockFlicker {
+  int dipFrame = -1, vanishFrame = -1, spuriousFrame = -1, flowFailFrame = -1;
+  double dipContrast = 0.20, vanishContrast = 0.08, flashGain = 3.0, flashNoise = 0.35;
+};
+struct LockStrand {
+  std::vector<double> x, y;  // centreline in frame px (row 0 = top), the part outside the head
+  double width = 0;
+  int lock = 0;
+};
+struct LocksSequence {
+  int w = 0, h = 0, frames = 0;
+  std::vector<std::vector<float>> rgb;          // per frame, w*h*3
+  std::vector<std::vector<float>> base;         // per frame, w*h
+  std::vector<std::vector<float>> region;       // per frame, w*h
+  std::vector<std::vector<float>> strandTruth;  // per frame, w*h
+  std::vector<std::vector<float>> headDistance;  // per frame, w*h: signed distance to the true head edge, > 0 inside
+  std::vector<std::vector<uint8_t>> spurious;   // per frame, w*h (empty when the frame has no spurious stroke)
+  std::vector<std::vector<LockStrand>> strands;  // per frame: the truth centrelines
+  std::vector<Affine> motion;                   // frame 0 -> frame t
+  LockFlicker flicker;
+};
+LocksSequence makeLocksSequence(int w, int h, int frames = 16, unsigned seed = 1,
+                                const LockFlicker& flicker = LockFlicker(), double baseJitterPx = 0.0);
 
 }  // namespace synth

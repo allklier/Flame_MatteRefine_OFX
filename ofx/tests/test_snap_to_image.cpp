@@ -537,6 +537,64 @@ void testTiming() {
   }
 }
 
+// The optional weight map (Focus Region, docs/focus_region.md): out = in + w (snapped - in). Known
+// answers: w 0 -> the input and w 1 -> the unweighted result, bit for bit; a constant 0.25 ->
+// exactly that expression; a half-frame weight is untouched where w = 0; NaN and values outside 0-1
+// are clamped; in place gives the same; stats count the weighted changes. nullptr is the code path
+// before the weight (no new code runs; hashes against the old build: docs/focus_region.md "Tests").
+// Mutations (2026-11-12): blending from out instead of src for an in-place call (in-place case
+// fails); "wi < 1" -> "wi <= 1" with the float blend (w 1 not bit-identical); no NaN guard (NaN case
+// fails).
+void testWeight() {
+  const Scene s = testScene(150, 110, 11);
+  const SnapParams p;
+  const std::vector<float> snapped = run(s, p);
+  const size_t n = snapped.size();
+  auto runW = [&](const std::vector<float>& wt, SnapStats* st = nullptr) {
+    std::vector<float> out(n);
+    mr::snapToImage(s.matte.data(), s.rgb.data(), out.data(), s.w, s.h, p, st, wt.data());
+    return out;
+  };
+  long diffSnap = 0;
+  for (size_t i = 0; i < n; ++i) diffSnap += snapped[i] != s.matte[i];
+  CHECK(diffSnap > 500);
+  CHECK(runW(std::vector<float>(n, 1.0f)) == snapped);
+  CHECK(runW(std::vector<float>(n, 7.0f)) == snapped);  // clamped to 1
+  CHECK(runW(std::vector<float>(n, 0.0f)) == s.matte);
+  CHECK(runW(std::vector<float>(n, -2.0f)) == s.matte);
+  CHECK(runW(std::vector<float>(n, std::numeric_limits<float>::quiet_NaN())) == s.matte);
+  const std::vector<float> q = runW(std::vector<float>(n, 0.25f));
+  long bad = 0;
+  for (size_t i = 0; i < n; ++i) bad += q[i] != s.matte[i] + 0.25f * (snapped[i] - s.matte[i]);
+  CHECK(bad == 0);
+  // Left half 0, right half 1: the left half is the input, the right half the snapped matte.
+  std::vector<float> half(n);
+  for (int y = 0; y < s.h; ++y)
+    for (int x = 0; x < s.w; ++x) half[size_t(y) * s.w + x] = x < s.w / 2 ? 0.0f : 1.0f;
+  SnapStats st;
+  const std::vector<float> o = runW(half, &st);
+  long leftChanged = 0, rightDiff = 0, changed = 0;
+  for (int y = 0; y < s.h; ++y)
+    for (int x = 0; x < s.w; ++x) {
+      const size_t i = size_t(y) * s.w + x;
+      if (x < s.w / 2) leftChanged += o[i] != s.matte[i];
+      else rightDiff += o[i] != snapped[i];
+      changed += o[i] != s.matte[i];
+    }
+  CHECK(leftChanged == 0 && rightDiff == 0 && changed > 100);
+  CHECK(st.pixelsChanged == changed);
+  // In place, with a weight: the same as separate buffers.
+  std::vector<float> inplace = s.matte;
+  mr::snapToImage(inplace.data(), s.rgb.data(), inplace.data(), s.w, s.h, p, nullptr, half.data());
+  CHECK(inplace == o);
+  inplace = s.matte;
+  const std::vector<float> quarter(n, 0.25f);
+  mr::snapToImage(inplace.data(), s.rgb.data(), inplace.data(), s.w, s.h, p, nullptr, quarter.data());
+  CHECK(inplace == q);
+  std::printf("weight: w 0 / 1 / NaN bit-identical, 0.25 exact, half frame: %ld changed, 0 on the w = 0 side\n",
+              changed);
+}
+
 }  // namespace
 
 int main() {
@@ -551,6 +609,7 @@ int main() {
   testBadPicture();
   testSynth();
   testNoSeam();
+  testWeight();
   testTiming();
   std::printf("%s (%d failure(s))\n", failures ? "FAILED" : "OK", failures);
   return failures ? 1 : 0;

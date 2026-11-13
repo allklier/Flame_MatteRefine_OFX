@@ -27,7 +27,12 @@ double snapEpsilon(double detail);
 
 // in, out: w*h floats 0-1; rgb: w*h*3 floats, the picture, scene-linear (values may exceed 1);
 // row 0 = the top row. out may be in. Output is clamped to 0-1.
+// weight (optional, w*h, 0-1; values outside are clamped, NaN = 0): where the snap may act (Focus
+// Region, docs/focus_region.md). out = in + weight (snapped - in), snapped = the result without a
+// weight; weight 0 -> in and weight 1 -> snapped, bit for bit. nullptr = no weight: the output is bit
+// for bit that of the code before the weight. With a weight, stats count the changes after weighting
+// (pixelsChanged, maxChange); bandPixels stays the band before weighting.
 void snapToImage(const float* in, const float* rgb, float* out, int w, int h, const SnapParams& p,
-                 SnapStats* stats = nullptr);
+                 SnapStats* stats = nullptr, const float* weight = nullptr);
 
 }  // namespace mr
