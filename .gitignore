@@ -3,3 +3,7 @@ dist/
 __pycache__/
 CLAUDE.local.md
 ofx/merge/data/
+.agent-status/
+.sensitive-patterns
+docs.local/
+*.token

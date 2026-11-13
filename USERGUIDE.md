@@ -14,6 +14,7 @@ anything else, and fixes its defects. It does not pull a new matte from the pict
 4. [Try it yourself: the test scenes](#4-try-it-yourself-the-test-scenes)
 5. [Which operation do I need?](#5-which-operation-do-i-need)
 6. [Matte Merge: combining two mattes](#6-matte-merge-combining-two-mattes)
+7. [Edge Recipes: Hair Locks](#7-edge-recipes-hair-locks)
 
 About the pictures: every before / after image in this guide was made from the synthetic test
 scenes (section 4) with the plugins' own code. The settings are given under each image. Mattes
@@ -92,8 +93,8 @@ Wire it like LTX Alpha Gen:
 | *Edge Refine runs on the CPU (slow): ...* / *Smart Fill runs on the CPU (slow): ...* | No usable GPU. It still works, but about ten times slower. |
 | *Temporal: ... The matte passes through this step.* / *Smart Fill: ... The matte passes through this step.* / *Edge Refine: ... The matte passes through.* | Something failed: a missing model, no runner, or a timeout. The node outputs the matte it received, unchanged, and tries again on the next frame. |
 
-Order of the operations: **Temporal → Smart Fill → Edge Refine.** There is one tab, with five columns:
-Matte, Temporal, Smart Fill, Edge Refine, Model & Support.
+Order of the operations: **Jump Repair → Temporal → Smart Fill → Edge Refine.** There is one tab, with six columns:
+Matte, Jump Repair, Temporal, Smart Fill, Edge Refine, Model & Support.
 
 ---
 
@@ -529,6 +530,7 @@ through unchanged, says why in the footer, and tries again on the next frame.
 | **Trimap** | What Edge Refine uses: solid core white, the edge band it re-solves grey, clear background black. |
 | **Changes** | The input matte in grey; added alpha **magenta**, removed alpha **green**: the same colours as Matte Refine's Show Changes view. |
 | **Holes** | The refined matte in grey; holes Smart Fill filled in **green**, holes it kept as real gaps in **red**. |
+| **Jumps** | Jump Repair's input matte in grey; matte it removed in **magenta**, matte it put back in **green** (the Changes colours), blobs it kept because they look like motion in **red**. |
 
 ### Smart Fill
 
@@ -629,6 +631,38 @@ Image 0.113, Edge Refine 0.049. Note the faint ghost lines just outside the head
 Top: input matte | the truth. Bottom: Edge Refine at Band px 10 | at Band px 30. The head's
 outline is restored and short stubs appear at the scalp, but the strands themselves are not
 recovered: about 13 % of the lost strand alpha comes back, the same at both band widths.*
+
+### Jump Repair
+
+**What it does.** A matting model sometimes makes a patch of matte that appears (or a hole that opens) for one to
+three frames while the frames around it agree. Jump Repair finds those patches by comparing each frame with its
+neighbours' mattes, and puts the neighbours' value back, only there. It uses no model and no picture, so it needs no
+GPU and is deterministic.
+
+**Never touches:** everything outside a repaired patch (the patch and a thin feathered border are the only changed
+pixels; the rest is bit for bit the input). It never invents matte.
+
+**When to use it:** a matte made frame by frame (an AI generator or a keyer) with single-frame blobs or holes that pop
+in for a frame. Switch on **View: Jumps** to see what it found. Run it before Temporal: the chain is Jump Repair,
+Temporal, Smart Fill, Edge Refine, so the later steps never see (and never sharpen) the blob.
+
+| Control | Default | Range | What it does |
+|---|---|---|---|
+| Enable | off | | Turns the operation on or off. |
+| Jump Above | 0.5 | 0.05-1 | How far (0-1) a pixel must lie outside both neighbour frames' mattes to count as a jump. |
+| Min Size % | 0.0125 | 0-1 | Patches smaller than this percentage of the frame area are left alone (about 260 px at HD, 1040 px at UHD). |
+| Span | 1 | 1-3 | How many frames a jump may last. 2-3 are repaired only where the matte around them does not move at all. |
+| Motion Guards | on | | On: a patch that moves like a real object (shifted in the frames before and after, or an edge turning back and forth) is kept, shown red in View Jumps. Off: every jump found is repaired; use it when you know the red ones are hallucinations. |
+
+Tips and limits:
+- It cannot tell a one-frame real object (a thrown object, a flash) from a hallucination. The guards keep what
+  looks like motion; check View Jumps and keyframe Enable off for such frames.
+- It looks at the frames before and after, so the first and last frames of a clip cannot be judged.
+- A patch's soft rim is removed with it (the repair grows along the faint edge until it meets the real matte), so
+  no faint outline stays behind.
+- Cost: a few milliseconds per frame at HD, plus the time Flame needs to hand over the neighbour frames.
+- On a real 97-frame matte with defaults it repaired the two clear one-frame blobs and kept twelve that looked like
+  motion; the matte was unchanged everywhere else.
 
 ### Temporal
 
@@ -874,3 +908,57 @@ flaws except by the rules above. Compare the result with the detail matte (a wip
 scenes the detail matte is deliberately blurred, shifted and padded with invented strands, so the result is fainter than the
 true hair; Strength above 1 compensates.
 
+## 7. Edge Recipes: Hair Locks
+
+**Edge Recipes** is a separate plugin (0.1.0, **experimental, source only: no package, not for use yet**; Rocky Linux only). Each node in it is a *recipe*: several
+of the methods in this guide, run in a fixed order for one common problem, sharing what they measure on the frame. You pick
+the recipe by the node you add, under **Edge Recipes** in Batch. A recipe shows only the controls that matter most; every
+other control is on its **Advanced** tab. The first recipe is **Hair Locks**.
+
+**Not yet tried in Flame.** Hair Locks has been tested outside Flame on synthetic scenes and one real frame. How it behaves
+on your shots, its speed in Flame and some of the layout below are still to be confirmed in a first Flame session.
+
+**What Hair Locks is for.** A good, tight matte (roto, a keyer, LTX Alpha Gen) that loses thin locks of hair over the whole
+shot. You draw a **Focus Region** around the hair; inside it the node brings the locks back; outside it the matte is left as
+it is (only the edge flicker is calmed, see Temporal below).
+
+**Refines and Rebuilds.** Most of what Hair Locks does *refines* the matte you give it, like the rest of this guide. One step
+is different: **Rebuild Detail creates matte from the picture.** It traces thin strands in the picture that your matte does
+not have and adds them. It is off by default, it only works inside the Focus Region, and when it is on the node says so in its
+Plan ("Created matte: ...") and the **Rebuilt** view shows exactly what it added. Check that view before you use the result.
+
+**Connect.**
+- **Source** (front, red): the picture, required; the matte on the source alpha (the second socket), as for the other nodes.
+- **FocusRegion** (a mask socket): your roto shape around the hair. Without it the region steps do nothing and the Plan says
+  "Connect a Focus Region". A soft shape is fine; **Feather %** softens it further.
+- **Detail** (optional mask socket): a matte with better hair detail (for example from LTX Alpha Gen), used as a third source
+  inside the region, as in Matte Merge.
+
+**Controls (tab Hair Locks)**
+- **Feather %:** the soft border of the Focus Region, in percent of the frame height. Outside the region nothing changes.
+- **Edge Model** (on): re-solves the hair inside the region with the ViTMatte model (needs `setup.sh` and an NVIDIA GPU;
+  without them this step is skipped and every other step still runs). **Model** (Small / Base, in Model & Colour) picks
+  the size; **Picture Colour** Auto / Bypass as in Matte Refine ML.
+- **Strand Gain:** how strongly the faint strands the model finds are lifted (1 = as found).
+- **Rebuild Detail** (off): see above. **Min Confidence:** rebuilt strands below this confidence are dropped; raise it if
+  Rebuild adds strands that are not there.
+- **Temporal Amount:** how much the edge outside the region is calmed with the neighbouring frames (0 = not at all).
+- **Snap Amount:** how strongly the new pixels inside the region snap to the picture's edges.
+
+The **Advanced** tab holds the rest, one column per step: Jump Repair (off by default; removes a patch of matte that appears
+or vanishes for 1-3 frames, as in Matte Refine ML), Focus Region (Region Grow %, Snap to Picture), Edge Model (Low
+Contrast), Rebuild Detail (Loose Pieces, Temporal Vote, Min Piece px) and Temporal (Enable, Frames, Band px).
+
+**Plan.** A column of short lines rewritten on every frame: which steps ran, what Rebuild Detail created, the model's state
+("Model Small: ready", "Model: needs setup.sh", "not installed"), which inputs are connected, and a note when something needs
+your attention.
+
+**View** (the image output; the matte output is always the result): **Result Matte**, **Picture**, **Changes** (as in Matte
+Refine's Show Changes), **Region** (the Focus Region as the node uses it, feather included), **Jumps** (what Jump Repair
+removed), **Candidates** (each source inside the region: model red, rebuilt strands green, Detail blue), **Rebuilt** (only what
+Rebuild Detail added) and **Trimap** (what the model was given).
+
+**Support:** Debug Logging, Collect Logs and Save Matte as in the other nodes; Hair Locks writes to the same log.
+
+**Analyze** (as Matte Refine's Analyze Frame, setting the controls from the frames you analyse) is planned for Hair Locks; it
+is not in this version.
