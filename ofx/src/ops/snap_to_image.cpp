@@ -126,7 +126,7 @@ double snapEpsilon(double detail) {
 }
 
 void snapToImage(const float* in, const float* rgb, float* out, int w, int h, const SnapParams& p,
-                 SnapStats* stats) {
+                 SnapStats* stats, const float* weight) {
   SnapStats st;
   const size_t n = size_t(std::max(w, 0)) * std::max(h, 0);
   // Pixels outside the band are copied; band pixels read the input from src, never from out
@@ -332,6 +332,22 @@ void snapToImage(const float* in, const float* rgb, float* out, int w, int h, co
     prev = cur.data();
   }
   pass(prev, out, true);
+  // The weight (snap_to_image.h): out = src + w (snapped - src), the ends exact. src is the input
+  // (or its copy when out is in), never overwritten above.
+  if (weight) {
+    long long changed = 0;
+    float maxChange = 0.0f;
+    for (size_t i = 0; i < n; ++i) {
+      const float wi = weight[i] > 0.0f ? std::min(weight[i], 1.0f) : 0.0f;  // NaN -> 0
+      if (wi < 1.0f) out[i] = wi > 0.0f ? src[i] + wi * (out[i] - src[i]) : src[i];
+      if (out[i] != src[i]) {
+        ++changed;
+        maxChange = std::max(maxChange, std::fabs(out[i] - src[i]));
+      }
+    }
+    st.pixelsChanged = changed;
+    st.maxChange = maxChange;
+  }
   if (stats) *stats = st;
 }
 

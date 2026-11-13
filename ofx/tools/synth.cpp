@@ -668,6 +668,67 @@ Sequence makeSequence(int w, int h, int frames, unsigned seed, bool movingBackgr
   return s;
 }
 
+JumpSequence makeJumpSequence(int w, int h, double jitterPx, unsigned seed, double rimPx) {
+  JumpSequence s;
+  s.w = w;
+  s.h = h;
+  s.frames = 20;
+  const size_t n = size_t(w) * h;
+  const double k = h / 1080.0, cx = w / 2.0, cy = h / 2.0;
+  // The figure's outer right edge at y = -40 (the right arm, frame 0 position), for jump (2).
+  double edgeX = 600;
+  while (sdFigure(edgeX, -40) < 0) edgeX -= 0.25;
+  auto figX = [](int t) { return -250.0 + 6.0 * t; };
+  const double dd[5][6] = {  // first, last, x, y, r, added (design units)
+      {3, 3, 300, -300, 20, 1},
+      {5, 5, 600, 250, 22, 0},
+      {7, 7, edgeX + figX(7) + 6, -40, 18, 1},
+      {10, 11, -600, -420, 20, 1},
+      {14, 16, 600, 250, 24, 0}};
+  for (const auto& d : dd) {
+    JumpDefect j;
+    j.first = int(d[0]);
+    j.last = int(d[1]);
+    j.cx = cx + d[2] * k;
+    j.cy = cy + d[3] * k;
+    j.r = d[4] * k;
+    j.added = d[5] != 0;
+    s.defects.push_back(j);
+  }
+  auto profile = [&](double sd) { return clamp01(0.5 + sd / (2.0 * k)); };
+  for (int t = 0; t < s.frames; ++t) {
+    std::vector<float> truth(n), matte(n);
+    std::vector<uint8_t> legit(n, 0);
+    const double L = 200 + 90 * std::cos(2 * M_PI * t / 8), discX = -900 + 80.0 * t;
+    const unsigned fs = seed * 7919u + 3000u + unsigned(t) * 104729u;
+    for (int py = 0; py < h; ++py)
+      for (int px = 0; px < w; ++px) {
+        const size_t i = size_t(py) * w + px;
+        const double x = (px - cx) / k, y = (py - cy) / k;
+        const double fig = sdFigure(x - figX(t), y);
+        const double box = sdRoundBox(x, y, 600, 250, 150, 150, 30);
+        const double disc = sdCircle(x, y, discX, -480, 16);
+        const double bar = sdCapsule(x, y, 850, 520, 850, 520 - L, 18);
+        const double sd = std::max(std::max(fig, box), std::max(disc, bar)) * k;
+        truth[i] = float(profile(sd));
+        const double jit = jitterPx > 0 ? jitterPx * k * (2 * noise(px, py, 18 * k, fs) - 1) : 0.0;
+        double m = profile(sd + jit);
+        for (const JumpDefect& j : s.defects) {
+          if (t < j.first || t > j.last) continue;
+          const double dj = std::hypot(px - j.cx, py - j.cy), rk = rimPx * k;
+          const double a = rimPx <= 0 ? profile(j.r - dj) : dj <= j.r ? 1.0 : std::exp(-4.5 * (dj - j.r) * (dj - j.r) / (rk * rk));
+          m = j.added ? std::max(m, a) : std::min(m, 1.0 - a);
+        }
+        matte[i] = float(m);
+        legit[i] = std::max(disc, bar) * k > -3.0 * k;
+      }
+    s.truth.push_back(std::move(truth));
+    s.matte.push_back(std::move(matte));
+    s.legit.push_back(std::move(legit));
+  }
+  return s;
+}
+
 double flicker(const Sequence& s, const std::vector<std::vector<float>>& mattes, double bandPx) {
   const int w = s.w, h = s.h;
   double sum = 0;
@@ -764,6 +825,228 @@ bool writeExr(const std::string& path, int w, int h, int channels, const std::ve
   if (!out) return false;
   const bool ok = std::fwrite(f.data(), 1, f.size(), out) == f.size();
   return std::fclose(out) == 0 && ok;
+}
+
+// ---- Edge Recipes WP6: the hair-locks sequence (synth.h, makeLocksSequence).
+namespace {
+
+struct LPt {
+  double x, y;
+};
+
+std::vector<LPt> lockBezier(const LPt P[4], int n) {
+  std::vector<LPt> o(n);
+  for (int i = 0; i < n; ++i) {
+    const double t = double(i) / (n - 1), u = 1 - t;
+    const double a = u * u * u, b = 3 * u * u * t, c = 3 * u * t * t, d = t * t * t;
+    o[i] = LPt{a * P[0].x + b * P[1].x + c * P[2].x + d * P[3].x, a * P[0].y + b * P[1].y + c * P[2].y + d * P[3].y};
+  }
+  return o;
+}
+
+std::vector<LPt> lockOffset(const std::vector<LPt>& p, double off) {  // along the left normal (-ty, tx)
+  const size_t n = p.size();
+  std::vector<LPt> q(n);
+  for (size_t i = 0; i < n; ++i) {
+    const size_t a = i ? i - 1 : 0, b = i + 1 < n ? i + 1 : n - 1;
+    double tx = p[b].x - p[a].x, ty = p[b].y - p[a].y;
+    const double l = std::max(std::hypot(tx, ty), 1e-12);
+    tx /= l;
+    ty /= l;
+    q[i] = LPt{p[i].x - off * ty, p[i].y + off * tx};
+  }
+  return q;
+}
+
+double distToPolyline(const std::vector<LPt>& p, double x, double y) {
+  double best = 1e30;
+  for (size_t i = 0; i + 1 < p.size(); ++i) {
+    const double vx = p[i + 1].x - p[i].x, vy = p[i + 1].y - p[i].y, px = x - p[i].x, py = y - p[i].y;
+    const double l2 = vx * vx + vy * vy;
+    const double t = l2 > 0 ? clamp01((px * vx + py * vy) / l2) : 0.0;
+    best = std::min(best, (px - t * vx) * (px - t * vx) + (py - t * vy) * (py - t * vy));
+  }
+  return std::sqrt(best);
+}
+
+// value(d) for every pixel of the polyline's bounding box grown by reach; out = max(out, value).
+template <class F>
+void paintNear(std::vector<float>& out, int w, int h, const std::vector<LPt>& p, double reach, F value) {
+  double x0 = 1e30, y0 = 1e30, x1 = -1e30, y1 = -1e30;
+  for (const LPt& q : p) x0 = std::min(x0, q.x), y0 = std::min(y0, q.y), x1 = std::max(x1, q.x), y1 = std::max(y1, q.y);
+  const int ix0 = std::max(int(std::floor(x0 - reach)), 0), iy0 = std::max(int(std::floor(y0 - reach)), 0);
+  const int ix1 = std::min(int(std::ceil(x1 + reach)), w - 1), iy1 = std::min(int(std::ceil(y1 + reach)), h - 1);
+  for (int y = iy0; y <= iy1; ++y)
+    for (int x = ix0; x <= ix1; ++x) {
+      const double v = value(distToPolyline(p, x, y));
+      float& o = out[size_t(y) * w + x];
+      if (v > o) o = float(v);
+    }
+}
+
+// Signed distance (> 0 inside) to an axis-aligned ellipse, first order (exact on the axes' ends).
+double sdEllipse(double x, double y, double rx, double ry) {
+  const double q = std::hypot(x / rx, y / ry);
+  if (q < 1e-9) return std::min(rx, ry);
+  const double g = std::hypot(x / (rx * rx), y / (ry * ry)) / q;
+  return (1.0 - q) / g;
+}
+
+}  // namespace
+
+LocksSequence makeLocksSequence(int w, int h, int frames, unsigned seed, const LockFlicker& fl, double baseJitterPx) {
+  LocksSequence s;
+  s.w = w;
+  s.h = h;
+  s.frames = frames;
+  s.flicker = fl;
+  const size_t n = size_t(w) * h;
+  const double k = h / 562.0;
+  const double hcx = w / 2.0 - 50 * k, hcy = h / 2.0, rx = 120 * k, ry = 160 * k;
+  const double SKIN[3] = {0.60, 0.42, 0.33}, HAIR[3] = {0.05, 0.035, 0.025};
+  std::mt19937 rng(seed * 2654435761u + 17u);
+  std::uniform_real_distribution<double> u(0.0, 1.0);
+  // Motion: about the head centre, rotation, x skew, translation.
+  for (int t = 0; t < frames; ++t) {
+    const double ang = 0.8 * t * M_PI / 180, sk = 0.01 * t, ca = std::cos(ang), sa = std::sin(ang);
+    Affine m;  // p' = c + T + R S (p - c), S = [1 sk; 0 1]
+    m.a = ca;
+    m.b = ca * sk - sa;
+    m.c = sa;
+    m.d = sa * sk + ca;
+    m.tx = hcx + 1.8 * k * t - (m.a * hcx + m.b * hcy);
+    m.ty = hcy - 0.5 * k * t - (m.c * hcx + m.d * hcy);
+    s.motion.push_back(m);
+  }
+  // Locks in frame-0 coordinates: root 4 px inside the head's edge, leaving along the outward normal.
+  struct Lock {
+    std::vector<LPt> mid;
+    std::vector<std::vector<LPt>> strands;
+    std::vector<double> widths;
+  };
+  auto makeLock = [&](double phiDeg, double len, double bend) {
+    const double phi = phiDeg * M_PI / 180;
+    const LPt E{hcx + rx * std::cos(phi), hcy + ry * std::sin(phi)};
+    double nx = std::cos(phi) / rx, ny = std::sin(phi) / ry;
+    const double l = std::hypot(nx, ny);
+    nx /= l;
+    ny /= l;
+    const double tx = -ny, ty = nx;
+    const LPt P[4] = {{E.x - 4 * nx, E.y - 4 * ny},
+                      {E.x + len / 3 * nx, E.y + len / 3 * ny},
+                      {E.x + 2 * len / 3 * nx + 0.4 * bend * tx, E.y + 2 * len / 3 * ny + 0.4 * bend * ty},
+                      {E.x + len * nx + bend * tx, E.y + len * ny + bend * ty}};
+    Lock L;
+    L.mid = lockBezier(P, 240);
+    return L;
+  };
+  Lock locks[2] = {makeLock(-25, 42 * k, 14 * k), makeLock(22, 38 * k, -12 * k)};
+  locks[0].strands.push_back(locks[0].mid);
+  locks[0].widths.push_back(3.0);
+  locks[1].strands.push_back(lockOffset(locks[1].mid, -2.25));
+  locks[1].strands.push_back(lockOffset(locks[1].mid, 2.25));
+  locks[1].widths.assign(2, 2.5);
+  std::vector<LPt> spur;
+  {
+    const std::vector<LPt> o = lockOffset(locks[1].mid, 9.5);
+    for (size_t i = 0; i < o.size(); ++i)
+      if (i >= o.size() * 35 / 100 && i <= o.size() * 90 / 100) spur.push_back(o[i]);
+  }
+  auto moved = [](const std::vector<LPt>& p, const Affine& m) {
+    std::vector<LPt> q(p.size());
+    for (size_t i = 0; i < p.size(); ++i) m.apply(p[i].x, p[i].y, &q[i].x, &q[i].y);
+    return q;
+  };
+  for (int t = 0; t < frames; ++t) {
+    const Affine& m = s.motion[t];
+    const Affine inv = m.inverse();
+    const unsigned fs = seed * 7919u + 5000u + unsigned(t) * 104729u;  // this frame's noise
+    double jph[3], jam = baseJitterPx;
+    for (double& p : jph) p = 2 * M_PI * u(rng);
+    std::vector<float> head(n), sd(n), base(n), region(n, 0.0f), truthCov(n, 0.0f), picCov(n, 0.0f);
+    for (int py = 0; py < h; ++py)
+      for (int px = 0; px < w; ++px) {
+        const size_t i = size_t(py) * w + px;
+        double qx, qy;
+        inv.apply(px, py, &qx, &qy);
+        const double d = sdEllipse(qx - hcx, qy - hcy, rx, ry);
+        const double phi = std::atan2((qy - hcy) / ry, (qx - hcx) / rx);
+        const double j = jam * (0.5 * std::sin(3 * phi + jph[0]) + 0.3 * std::sin(7 * phi + jph[1]) +
+                                0.2 * std::sin(13 * phi + jph[2]));
+        sd[i] = float(d);
+        head[i] = float(clamp01(d + 0.5));
+        base[i] = float(clamp01(d + j + 0.5));
+      }
+    // locks: truth coverage, picture coverage (contrast per lock on dip / vanish frames), region
+    std::vector<LockStrand> lines;
+    for (int L = 0; L < 2; ++L) {
+      const double contrast = (L == 0 && t == fl.dipFrame) ? fl.dipContrast
+                              : (L == 1 && t == fl.vanishFrame) ? fl.vanishContrast : 1.0;
+      for (size_t si = 0; si < locks[L].strands.size(); ++si) {
+        const std::vector<LPt> p = moved(locks[L].strands[si], m);
+        const double sw = locks[L].widths[si];
+        std::vector<float> cov(n, 0.0f);
+        paintNear(cov, w, h, p, sw, [&](double dd) { return clamp01(sw * 0.5 + 0.5 - dd); });
+        for (size_t i = 0; i < n; ++i) {
+          truthCov[i] = float(1.0 - (1.0 - truthCov[i]) * (1.0 - cov[i]));
+          picCov[i] = float(1.0 - (1.0 - picCov[i]) * (1.0 - contrast * cov[i]));
+        }
+        LockStrand ls;
+        ls.width = sw;
+        ls.lock = L;
+        for (const LPt& q : p) {
+          const int ix = std::min(std::max(int(std::lround(q.x)), 0), w - 1);
+          const int iy = std::min(std::max(int(std::lround(q.y)), 0), h - 1);
+          if (head[size_t(iy) * w + ix] >= 0.5) continue;
+          ls.x.push_back(q.x);
+          ls.y.push_back(q.y);
+        }
+        lines.push_back(ls);
+      }
+      const double R = 14 * k, F = 5 * k;
+      paintNear(region, w, h, moved(locks[L].mid, m), R + F, [&](double dd) { return clamp01((R - dd) / F + 0.5); });
+    }
+    std::vector<uint8_t> spurMask;
+    if (t == fl.spuriousFrame) {
+      std::vector<float> cov(n, 0.0f);
+      paintNear(cov, w, h, moved(spur, m), 2.5, [&](double dd) { return clamp01(1.25 + 0.5 - dd); });
+      spurMask.assign(n, 0);
+      for (size_t i = 0; i < n; ++i) {
+        picCov[i] = float(1.0 - (1.0 - picCov[i]) * (1.0 - cov[i]));
+        spurMask[i] = cov[i] > 0.2f ? 1 : 0;
+      }
+    }
+    std::vector<float> rgb(n * 3), truth(n);
+    const bool flash = t == fl.flowFailFrame;
+    for (int py = 0; py < h; ++py)
+      for (int px = 0; px < w; ++px) {
+        const size_t i = size_t(py) * w + px;
+        double qx, qy;
+        inv.apply(px, py, &qx, &qy);
+        const double lo = 2 * noise(px, py, 12 * k, seed + 51) - 1;
+        const double pore = clamp01((noise(px, py, 1.6, seed + 52) - 0.72) * 5);
+        const double hm = 2 * noise(qx, qy, 6, seed + 53) - 1;
+        const double sn = 1 + 0.006 * (2 * hash01(px, py, fs) - 1);
+        const double fn = flash ? fl.flashNoise * (2 * hash01(px, py, fs + 1) - 1) : 0.0;
+        for (int c = 0; c < 3; ++c) {
+          double v = SKIN[c] * (1 + 0.08 * lo) * (1 - 0.15 * double(py) / h) * (1 - 0.12 * pore);
+          v = v * (1 - picCov[i]) + HAIR[c] * picCov[i];
+          v = v * (1 - head[i]) + HAIR[c] * (1 + 0.3 * hm) * head[i];
+          v *= sn;
+          if (flash) v = std::max(0.0, v * fl.flashGain * (1 + fn));
+          rgb[i * 3 + c] = float(v);
+        }
+        truth[i] = float(truthCov[i] * (1.0 - head[i]));
+      }
+    s.rgb.push_back(std::move(rgb));
+    s.base.push_back(std::move(base));
+    s.region.push_back(std::move(region));
+    s.strandTruth.push_back(std::move(truth));
+    s.headDistance.push_back(std::move(sd));
+    s.spurious.push_back(std::move(spurMask));
+    s.strands.push_back(std::move(lines));
+  }
+  return s;
 }
 
 }  // namespace synth
