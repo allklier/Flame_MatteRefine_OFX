@@ -52,7 +52,9 @@ UNVERIFIED). Keep this file under ~250 lines.
   → a footer error (the render still runs). Verified on Flame's 2026.0 aces2.0 config: ACEScg
   scene-linear, ACEScct log, Matte / Raw data. A first parser attached the named transforms'
   `encoding: log` to the last colourspace (Raw): test case added. Converting the picture to
-  linear automatically (preferred colourspace) is the alternative, not built.
+  linear automatically (preferred colourspace) is the alternative, not built: user confirmed 2026-10-25 that plugin 1
+  keeps the picture as it arrives (no Auto / Bypass like ML's decision 34, whose Rec.709 display target would be wrong
+  for this op); revisit only if testers ask.
 - **25. DECIDED (user, 2026-10-23): "Foreground Colour" is shown as "Edge Colour Unmix".** The
   old name read like another matte operation and isn't an artist's term; "Decontaminate" could
   also be read as a matte operation; it isn't despill either (nothing is replaced with the

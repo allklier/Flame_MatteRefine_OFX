@@ -10,6 +10,9 @@ matte: they keep a good matte and fix its defects. Three nodes, all under *Matte
 - **Matte Merge**: takes a matte with poor edge detail and a second matte with better detail (hair, fur) and
   merges the detail into the first, aligned to the picture. CPU only, real time (Rocky Linux and macOS).
 
+A fourth plugin, **Edge Recipes** (0.1.0, **experimental, source only: no package, not for use yet**), runs several of these
+methods in a fixed order for one common problem. The first recipe is **Hair Locks** (USERGUIDE.md, section 7).
+
 **How to use every operation, with before / after pictures: [USERGUIDE.md](USERGUIDE.md).**
 
 ## Operations
@@ -31,6 +34,8 @@ Matte Refine, in chain order:
 
 Matte Refine ML, in chain order:
 
+- **Jump Repair**: removes a patch of matte that appears (or a hole that opens) for one to three frames while the
+  neighbouring frames agree. No model needed.
 - **Smart Fill**: fills holes that are part of the subject and keeps real gaps, decided per hole
   by a segmentation model and the picture's colour.
 - **Edge Refine**: re-solves a band around the matte's edge with a matting model (ViTMatte);
@@ -45,7 +50,7 @@ Matte Refine ML, in chain order:
   the detail matte on the third (Detail).
 - The node's **matte output** is always the refined matte. Its **image output** follows
   **View**: Matte Refine has Picture (default), Show Changes, Matte, Trimap and Grey Inside;
-  Matte Refine ML has Picture (default), Matte, Trimap, Changes and Holes (USERGUIDE.md).
+  Matte Refine ML has Picture (default), Matte, Trimap, Changes, Holes and Jumps (USERGUIDE.md).
 
 ## Install
 
@@ -59,21 +64,29 @@ Five packages; each installs on its own:
 | `MatteRefine-<version>-macos-arm64.tar.gz` | macOS 15 or later, Apple Silicon | Matte Refine |
 | `MatteMerge-<version>-macos-arm64.tar.gz` | macOS 15 or later, Apple Silicon | Matte Merge |
 
-Matte Refine ML is Linux only. `SHA256SUMS` lists the checksums (`sha256sum -c SHA256SUMS`; on macOS
+Matte Refine ML and Edge Recipes are Linux only. `SHA256SUMS` lists the checksums (`sha256sum -c SHA256SUMS`; on macOS
 `shasum -a 256 -c SHA256SUMS`). Unpack a package, then, with Flame closed:
 
 ```
 sudo ./install.sh              # copies the bundle to /usr/OFX/Plugins (macOS: /Library/OFX/Plugins)
-sudo ./install.sh --uninstall  # removes all three plugins
+sudo ./install.sh --uninstall  # removes the plugin(s) of this package; other installed plugins stay
 ```
 
-All nodes appear under **Matte Refine** in Flame. Installing a newer package replaces the older version.
+Plugins 1-3 appear under **Matte Refine** in Flame, Edge Recipes under **Edge Recipes**. Installing a newer package
+replaces the older version of its own plugin only.
+
+**Edge Recipes and the single plugins side by side:** the Edge Recipes package installs only its own bundle, which already
+holds every method it uses; Matte Refine, Matte Refine ML and Matte Merge stay separate packages that you can install
+instead or as well. They do not conflict: separate nodes and settings, one shared log, and one shared model folder and
+licence acceptance (`setup.sh` is the same in both ML packages). Matte Refine ML and Edge Recipes each start their own
+model process, so with both rendering in one session the GPU memory for the model is used twice (about 1.5 GB each).
 
 **macOS:** the bundles are not notarised by Apple. A downloaded tarball is marked as quarantined; `install.sh` removes
 that flag from the installed bundle, so Gatekeeper does not block it. Install with `install.sh` rather than copying the
 bundle by hand. The Mac builds have been tested on Apple Silicon outside Flame; they have not been tried in Flame yet.
 
-**Matte Refine ML needs a second step, as your normal user (not root):**
+**Matte Refine ML, and Edge Recipes' model steps, need a second step, as your normal user (not root); once covers
+both:**
 
 ```
 ./setup.sh
@@ -83,8 +96,9 @@ The models and the NVIDIA libraries are not part of the plugin: `setup.sh` shows
 BiRefNet are MIT; ONNX Runtime is MIT; NVIDIA CUDA and cuDNN are under NVIDIA's own terms), asks you to accept them, asks
 whether to also install the full-size models (default: no), and downloads the files to `~/.local/share/matte-refine-ml/`
 (about 1.9 GB; 3.2 GB with the full models), checking each against a fixed checksum. It writes your choices to
-`~/.config/matte-refine/config.conf`. Until the licences are accepted the node passes the matte through and says so in
-its footer. Run `./setup.sh --full` later to add the full models and `./setup.sh --remove` to take everything out. Then
+`~/.config/matte-refine/config.conf`. Until the licences are accepted the Matte Refine ML node passes the matte through
+and says so in its footer; Edge Recipes runs its other steps and says in its Plan that the model step needs `setup.sh`. Run `./setup.sh --full` later to add the full models and `./setup.sh --remove` to take everything out (it warns first
+when the other ML plugin is still installed and uses the same files). Then
 restart Flame. Options: `--accept-licences`, `--full` / `--no-full`, `--prefix DIR`, `--from DIR` (offline install from a
 folder of the downloaded files).
 
