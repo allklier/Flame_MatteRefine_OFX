@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Matte Refine ML for Flame: per-user setup. Run it as your normal user (not root, not sudo), after
+# Matte Refine ML and Edge Recipes (its model steps) for Flame: per-user setup, one for both (the same
+# licences.txt, model folder and config keys). Run it as your normal user (not root, not sudo), after
 # the admin ran install.sh. It shows the licences of the models and libraries (licences.txt), and
 # when you accept them it downloads the models and the NVIDIA CUDA libraries into your home folder,
 # checks every file's SHA-256 and writes three lines into ~/.config/matte-refine/config.conf
@@ -15,6 +16,7 @@
 #                                   writes it: models/<id>/model.onnx, cuda_libs/*.so*, wheels/*.whl);
 #                                   every file is verified, nothing is downloaded
 #   ./setup.sh --remove [-y]        delete the data folder's models and libraries and the ml_* keys
+#                                   (warns first when another plugin that uses them is still installed)
 #
 # Running it again is safe: files already there are verified and kept, a broken download resumes,
 # only what is missing is fetched, and the licences are asked again only if licences.txt changed.
@@ -22,7 +24,8 @@
 # when it runs it keeps a small cache of its own in ~/.cache/Microsoft/DeveloperTools/.onnxruntime.
 #
 # Test-only (not for users): MRML_SETUP_BASE_HF and MRML_SETUP_BASE_PYPI replace the download
-# hosts (https://huggingface.co, https://files.pythonhosted.org/packages) with a local mirror.
+# hosts (https://huggingface.co, https://files.pythonhosted.org/packages) with a local mirror;
+# MRML_SETUP_PLUGINS_DIR replaces the plugin folder --remove looks in (/usr/OFX/Plugins).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -93,7 +96,7 @@ while [ $# -gt 0 ]; do
     --from) [ $# -ge 2 ] || die "--from needs a folder"; FROM="$(cd "$2" && pwd)" || die "no folder $2"; shift ;;
     --remove) REMOVE=1 ;;
     -y) YES=1 ;;
-    -h | --help) sed -n '2,25p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,28p' "$0"; exit 0 ;;
     *) die "unknown option $1 (see --help)" ;;
   esac
   shift
@@ -106,13 +109,23 @@ if [ "$REMOVE" = 1 ]; then
     if [ -n "$md" ] && [ "${md%/models}/cuda_libs" = "$cl" ]; then DATA="${md%/models}"; fi
   fi
   DATA="${DATA:-$HOME/.local/share/matte-refine-ml}"
+  # Matte Refine ML and Edge Recipes share these files: warn when a bundle that uses them, other than this
+  # package's own (next to this script), is still installed.
+  PLUGINS="${MRML_SETUP_PLUGINS_DIR:-/usr/OFX/Plugins}"
+  for b in MatteRefineML.ofx.bundle EdgeRecipes.ofx.bundle; do
+    if [ -d "$PLUGINS/$b" ] && [ ! -d "$HERE/$b" ]; then
+      echo "WARNING: $PLUGINS/$b is installed and uses these models and libraries too:"
+      echo "         after this its model steps stop working until setup.sh is run again."
+    fi
+  done
   echo "This deletes $DATA/models, $DATA/cuda_libs and $DATA/downloads,"
   echo "and the lines ml_model_dir, ml_cuda_libs, ml_licence_accepted and ml_full_declined in $CONFIG."
-  [ "$YES" = 1 ] || ask "Remove Matte Refine ML's models and libraries? [y/N] " || { echo "Nothing was changed."; exit 1; }
+  [ "$YES" = 1 ] || ask "Remove the models and libraries (Matte Refine ML and Edge Recipes)? [y/N] " || { echo "Nothing was changed."; exit 1; }
   rm -rf "${DATA:?}/models" "${DATA:?}/cuda_libs" "${DATA:?}/downloads"
   rmdir "$DATA" 2>/dev/null || true
   if [ -f "$CONFIG" ]; then for k in ml_model_dir ml_cuda_libs ml_licence_accepted ml_full_declined; do config_write "$k"; done; fi
-  echo "Removed. Matte Refine ML's nodes pass the matte through until setup.sh is run again; restart Flame."
+  echo "Removed. Matte Refine ML's nodes pass the matte through and Edge Recipes' model steps are off until"
+  echo "setup.sh is run again; restart Flame."
   exit 0
 fi
 
@@ -275,7 +288,7 @@ if [ "$FULL" = 1 ] || want_full; then config_write ml_full_declined; else config
 
 # 6. Done.
 echo
-echo "Matte Refine ML is set up for $(id -un):"
+echo "Matte Refine ML and Edge Recipes' model steps are set up for $(id -un):"
 for m in "${MODELS[@]}"; do
   IFS='|' read -r id _ _ _ _ <<<"$m"
   [ -n "${OK[$id]:-}" ] && echo "  model  $DATA/models/$id/model.onnx"
@@ -285,4 +298,4 @@ echo "  CUDA   $DATA/cuda_libs (${#LIBS[@]} libraries; $lt)"
 echo "  config $CONFIG (ml_model_dir, ml_cuda_libs, ml_licence_accepted)"
 want_full || echo "  The full models (ViTMatte Base, BiRefNet Full) are not installed: add them with $0 --full"
 echo "  size   $(du -sh "$DATA" | cut -f1) in $DATA"
-echo "Restart Flame (quit it completely) so the Matte Refine ML nodes pick this up."
+echo "Restart Flame (quit it completely) so the Matte Refine ML and Edge Recipes nodes pick this up."

@@ -3,12 +3,14 @@
 # loads), in the source copy scripts/build_remote.sh syncs there:
 #   ORT_DIR=<extracted onnxruntime-linux-x64-gpu_cuda13-1.31.0> scripts/package_release.sh <build dir>
 # Configures and builds <build dir> (Release, MR_BUILD_ML=ON, MRML_BUNDLE_ORT=ON: ONNX Runtime inside
-# the ML bundle, the runner's RUNPATH $ORIGIN/lib only; MR_BUILD_MERGE=ON), runs ctest, stages and
-# writes into dist/:
+# the ML and Edge Recipes bundles, each runner's RUNPATH $ORIGIN/lib only; MR_BUILD_MERGE=ON,
+# MR_BUILD_RECIPES=ON), runs ctest, stages and writes into dist/:
 #   MatteRefine-<MR_VERSION>-linux-x86_64.tar.gz      Matte Refine (plugin 1), install.sh, docs
 #   MatteRefineML-<MRML_VERSION>-linux-x86_64.tar.gz  Matte Refine ML with ONNX Runtime, install.sh,
 #                                                     setup.sh, licences.txt, docs (no models, no CUDA)
 #   MatteMerge-<MM_VERSION>-linux-x86_64.tar.gz       Matte Merge (plugin 3), install.sh, docs
+#   EdgeRecipes-<ER_VERSION>-linux-x86_64.tar.gz      Edge Recipes with its own runner and ONNX Runtime,
+#                                                     install.sh, setup.sh, licences.txt, README.txt, docs
 #   SHA256SUMS
 # MR_GIT=<hash> names the build (the copy on the build machine has no .git; build_remote.sh's way).
 set -euo pipefail
@@ -22,23 +24,38 @@ DIST="${DIST:-$SRC/dist}"  # DIST=<folder> elsewhere (tests)
 MR_VERSION="$(sed -n 's/^set(MR_VERSION "\(.*\)")$/\1/p' "$SRC/CMakeLists.txt")"
 MRML_VERSION="$(sed -n 's/^set(MRML_VERSION "\(.*\)")$/\1/p' "$SRC/ofx/ml/CMakeLists.txt")"
 MM_VERSION="$(sed -n 's/^set(MM_VERSION "\(.*\)")$/\1/p' "$SRC/ofx/merge/CMakeLists.txt")"
-[ -n "$MR_VERSION" ] && [ -n "$MRML_VERSION" ] && [ -n "$MM_VERSION" ] \
+ER_VERSION="$(sed -n 's/^set(ER_VERSION "\(.*\)")$/\1/p' "$SRC/ofx/recipes/plugin/CMakeLists.txt")"
+[ -n "$MR_VERSION" ] && [ -n "$MRML_VERSION" ] && [ -n "$MM_VERSION" ] && [ -n "$ER_VERSION" ] \
   || { echo "error: versions not found in the CMake files" >&2; exit 1; }
-echo "Matte Refine $MR_VERSION, Matte Refine ML $MRML_VERSION, Matte Merge $MM_VERSION," \
+echo "Matte Refine $MR_VERSION, Matte Refine ML $MRML_VERSION, Matte Merge $MM_VERSION, Edge Recipes $ER_VERSION," \
   "ONNX Runtime $(cat "$ORT_DIR/VERSION_NUMBER")"
 
 cmake -S "$SRC" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release -DMR_BUILD_ML=ON -DMRML_BUNDLE_ORT=ON \
-  -DMR_BUILD_MERGE=ON -DORT_DIR="$ORT_DIR" ${MR_GIT:+-DMR_GIT=$MR_GIT} >/dev/null
+  -DMR_BUILD_MERGE=ON -DMR_BUILD_RECIPES=ON -DORT_DIR="$ORT_DIR" ${MR_GIT:+-DMR_GIT=$MR_GIT} >/dev/null
 cmake --build "$BUILD" -j 8
 (cd "$BUILD" && ctest --output-on-failure)
 
-# The runner must find ONNX Runtime inside the bundle only.
-RUNNER="$BUILD/MatteRefineML.ofx.bundle/Contents/Resources/mr_ml_runner"
-RP="$(readelf -d "$RUNNER" | sed -n 's/.*(\(RUNPATH\|RPATH\)).*\[\(.*\)\]/\2/p')"  # Rocky 9's linker writes DT_RPATH, others DT_RUNPATH
-[ "$RP" = '$ORIGIN/lib' ] || { echo "error: mr_ml_runner RUNPATH is '$RP', not \$ORIGIN/lib" >&2; exit 1; }
-for f in libonnxruntime.so.1 libonnxruntime_providers_shared.so libonnxruntime_providers_cuda.so; do
-  [ -e "$BUILD/MatteRefineML.ofx.bundle/Contents/Resources/lib/$f" ] || { echo "error: $f not in the ML bundle" >&2; exit 1; }
+# Each runner (Matte Refine ML's, Edge Recipes') must find ONNX Runtime inside its bundle only.
+for b in MatteRefineML EdgeRecipes; do
+  RUNNER="$BUILD/$b.ofx.bundle/Contents/Resources/mr_ml_runner"
+  RP="$(readelf -d "$RUNNER" | sed -n 's/.*(\(RUNPATH\|RPATH\)).*\[\(.*\)\]/\2/p')"  # Rocky 9's linker writes DT_RPATH, others DT_RUNPATH
+  [ "$RP" = '$ORIGIN/lib' ] || { echo "error: $b's mr_ml_runner RUNPATH is '$RP', not \$ORIGIN/lib" >&2; exit 1; }
+  for f in libonnxruntime.so.1 libonnxruntime_providers_shared.so libonnxruntime_providers_cuda.so; do
+    [ -e "$BUILD/$b.ofx.bundle/Contents/Resources/lib/$f" ] || { echo "error: $f not in the $b bundle" >&2; exit 1; }
+  done
 done
+# Edge Recipes' .ofx links no ORT / CUDA (decision 32, the check plugin 2's ctest runs), and its runner has its own
+# build id ("ER <ER_VERSION> <git>", plugin 2's is "<MRML_VERSION> <git>"): one runner process each, never replaced
+# by the other plugin's (docs/edge_recipes.md 1.3). --version reads no config; HOME points into the build.
+sh "$SRC/ofx/ml/tests/check_bundle_deps.sh" "$BUILD/EdgeRecipes.ofx.bundle/Contents/Linux-x86-64/EdgeRecipes.ofx" >/dev/null \
+  || { echo "error: EdgeRecipes.ofx fails check_bundle_deps.sh" >&2; exit 1; }
+mkdir -p "$BUILD/version_home"
+ID2="$(HOME="$BUILD/version_home" "$BUILD/MatteRefineML.ofx.bundle/Contents/Resources/mr_ml_runner" --version | cut -d, -f1)"
+IDER="$(HOME="$BUILD/version_home" "$BUILD/EdgeRecipes.ofx.bundle/Contents/Resources/mr_ml_runner" --version | cut -d, -f1)"
+case "$ID2|$IDER" in
+  "mr_ml_runner $MRML_VERSION "*"|mr_ml_runner ER $ER_VERSION "*) echo "runner build ids: '$ID2', '$IDER'" ;;
+  *) echo "error: runner build ids '$ID2' / '$IDER' (want '<MRML_VERSION> <git>' / 'ER <ER_VERSION> <git>')" >&2; exit 1 ;;
+esac
 
 STAGE="$BUILD/stage"
 rm -rf "$STAGE"
@@ -81,15 +98,29 @@ cp -R "$BUILD/MatteMerge.ofx.bundle" "$STAGE/$P3/"
 cp "$SRC/packaging/install.sh" "$STAGE/$P3/"
 add_guide "$STAGE/$P3"
 set_version "$STAGE/$P3/install.sh" "$MM_VERSION"
-chmod a+rx "$STAGE/$P1/install.sh" "$STAGE/$P2/install.sh" "$STAGE/$P2/setup.sh" "$STAGE/$P3/install.sh"
 
-for p in "$P1" "$P2" "$P3"; do
+# Edge Recipes (decision 41): only its own bundle, which holds every method, its own runner and ONNX Runtime;
+# laid out as Matte Refine ML's package, with the SAME licences.txt and setup.sh (one acceptance, one model folder).
+P4="EdgeRecipes-$ER_VERSION-linux-x86_64"
+mkdir -p "$STAGE/$P4/THIRD_PARTY"
+cp -R "$BUILD/EdgeRecipes.ofx.bundle" "$STAGE/$P4/"
+cp "$SRC/packaging/licences.txt" "$STAGE/$P4/EdgeRecipes.ofx.bundle/Contents/Resources/"
+cp "$SRC/packaging/install.sh" "$SRC/packaging/setup.sh" "$SRC/packaging/licences.txt" "$SRC/ofx/recipes/package/README.txt" \
+  "$STAGE/$P4/"
+add_guide "$STAGE/$P4"
+cp "$ORT_DIR/LICENSE" "$STAGE/$P4/THIRD_PARTY/onnxruntime-LICENSE.txt"
+cp "$ORT_DIR/ThirdPartyNotices.txt" "$STAGE/$P4/THIRD_PARTY/onnxruntime-ThirdPartyNotices.txt"
+set_version "$STAGE/$P4/install.sh" "$ER_VERSION"
+chmod a+rx "$STAGE/$P1/install.sh" "$STAGE/$P2/install.sh" "$STAGE/$P2/setup.sh" "$STAGE/$P3/install.sh" \
+  "$STAGE/$P4/install.sh" "$STAGE/$P4/setup.sh"
+
+for p in "$P1" "$P2" "$P3" "$P4"; do
   rm -f "$DIST/$p.tar.gz"
   tar -C "$STAGE" --owner=0 --group=0 -czf "$DIST/$p.tar.gz" "$p"
 done
-(cd "$DIST" && sha256sum "$P1.tar.gz" "$P2.tar.gz" "$P3.tar.gz" >SHA256SUMS)
+(cd "$DIST" && sha256sum "$P1.tar.gz" "$P2.tar.gz" "$P3.tar.gz" "$P4.tar.gz" >SHA256SUMS)
 echo
 echo "Packages in $DIST:"
-(cd "$DIST" && ls -l "$P1.tar.gz" "$P2.tar.gz" "$P3.tar.gz" SHA256SUMS && cat SHA256SUMS)
+(cd "$DIST" && ls -l "$P1.tar.gz" "$P2.tar.gz" "$P3.tar.gz" "$P4.tar.gz" SHA256SUMS && cat SHA256SUMS)
 echo "Unpacked: $(du -sh "$STAGE/$P1" | cut -f1) (Matte Refine), $(du -sh "$STAGE/$P2" | cut -f1) (Matte Refine ML)," \
-  "$(du -sh "$STAGE/$P3" | cut -f1) (Matte Merge)"
+  "$(du -sh "$STAGE/$P3" | cut -f1) (Matte Merge), $(du -sh "$STAGE/$P4" | cut -f1) (Edge Recipes)"

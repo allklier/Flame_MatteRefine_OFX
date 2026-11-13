@@ -3,10 +3,10 @@
 #   HOST=<ssh host> scripts/build_remote.sh
 # Builds in the user's home only; never touches /usr/OFX/Plugins. The one-time install
 # symlink is done by hand with sudo:
-#   sudo ln -s ~/MatteRefine_build/build/MatteRefine.ofx.bundle /usr/OFX/Plugins/
+#   sudo ln -s ~/ClaudeCode/MatteRefine_build/build/MatteRefine.ofx.bundle /usr/OFX/Plugins/
 set -euo pipefail
 HOST=${HOST:?set HOST to the ssh name of the Rocky 9 build machine}
-REMOTE=${REMOTE:-MatteRefine_build}
+REMOTE=${REMOTE:-ClaudeCode/MatteRefine_build}
 SRC="$(cd "$(dirname "$0")/.." && pwd)"
 
 ssh "$HOST" "mkdir -p $REMOTE/src"
