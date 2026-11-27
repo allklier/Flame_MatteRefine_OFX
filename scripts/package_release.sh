@@ -4,13 +4,14 @@
 #   ORT_DIR=<extracted onnxruntime-linux-x64-gpu_cuda13-1.31.0> scripts/package_release.sh <build dir>
 # Configures and builds <build dir> (Release, MR_BUILD_ML=ON, MRML_BUNDLE_ORT=ON: ONNX Runtime inside
 # the ML and Edge Recipes bundles, each runner's RUNPATH $ORIGIN/lib only; MR_BUILD_MERGE=ON,
-# MR_BUILD_RECIPES=ON), runs ctest, stages and writes into dist/:
+# MR_BUILD_RECIPES=ON, MR_BUILD_PLATE=ON), runs ctest, stages and writes into dist/:
 #   MatteRefine-<MR_VERSION>-linux-x86_64.tar.gz      Matte Refine (plugin 1), install.sh, docs
 #   MatteRefineML-<MRML_VERSION>-linux-x86_64.tar.gz  Matte Refine ML with ONNX Runtime, install.sh,
 #                                                     setup.sh, licences.txt, docs (no models, no CUDA)
 #   MatteMerge-<MM_VERSION>-linux-x86_64.tar.gz       Matte Merge (plugin 3), install.sh, docs
 #   EdgeRecipes-<ER_VERSION>-linux-x86_64.tar.gz      Edge Recipes with its own runner and ONNX Runtime,
 #                                                     install.sh, setup.sh, licences.txt, README.txt, docs
+#   PlateTools-<PT_VERSION>-linux-x86_64.tar.gz       Plate Tools (Plate Merge), install.sh, docs (no ONNX Runtime, no models)
 #   SHA256SUMS
 # MR_GIT=<hash> names the build (the copy on the build machine has no .git; build_remote.sh's way).
 set -euo pipefail
@@ -25,13 +26,14 @@ MR_VERSION="$(sed -n 's/^set(MR_VERSION "\(.*\)")$/\1/p' "$SRC/CMakeLists.txt")"
 MRML_VERSION="$(sed -n 's/^set(MRML_VERSION "\(.*\)")$/\1/p' "$SRC/ofx/ml/CMakeLists.txt")"
 MM_VERSION="$(sed -n 's/^set(MM_VERSION "\(.*\)")$/\1/p' "$SRC/ofx/merge/CMakeLists.txt")"
 ER_VERSION="$(sed -n 's/^set(ER_VERSION "\(.*\)")$/\1/p' "$SRC/ofx/recipes/plugin/CMakeLists.txt")"
-[ -n "$MR_VERSION" ] && [ -n "$MRML_VERSION" ] && [ -n "$MM_VERSION" ] && [ -n "$ER_VERSION" ] \
+PT_VERSION="$(sed -n 's/^set(PT_VERSION "\(.*\)")$/\1/p' "$SRC/ofx/plate/CMakeLists.txt")"
+[ -n "$MR_VERSION" ] && [ -n "$MRML_VERSION" ] && [ -n "$MM_VERSION" ] && [ -n "$ER_VERSION" ] && [ -n "$PT_VERSION" ] \
   || { echo "error: versions not found in the CMake files" >&2; exit 1; }
-echo "Matte Refine $MR_VERSION, Matte Refine ML $MRML_VERSION, Matte Merge $MM_VERSION, Edge Recipes $ER_VERSION," \
+echo "Matte Refine $MR_VERSION, Matte Refine ML $MRML_VERSION, Matte Merge $MM_VERSION, Edge Recipes $ER_VERSION, Plate Tools $PT_VERSION," \
   "ONNX Runtime $(cat "$ORT_DIR/VERSION_NUMBER")"
 
 cmake -S "$SRC" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release -DMR_BUILD_ML=ON -DMRML_BUNDLE_ORT=ON \
-  -DMR_BUILD_MERGE=ON -DMR_BUILD_RECIPES=ON -DORT_DIR="$ORT_DIR" ${MR_GIT:+-DMR_GIT=$MR_GIT} >/dev/null
+  -DMR_BUILD_MERGE=ON -DMR_BUILD_RECIPES=ON -DMR_BUILD_PLATE=ON -DORT_DIR="$ORT_DIR" ${MR_GIT:+-DMR_GIT=$MR_GIT} >/dev/null
 cmake --build "$BUILD" -j 8
 (cd "$BUILD" && ctest --output-on-failure)
 
@@ -111,16 +113,23 @@ add_guide "$STAGE/$P4"
 cp "$ORT_DIR/LICENSE" "$STAGE/$P4/THIRD_PARTY/onnxruntime-LICENSE.txt"
 cp "$ORT_DIR/ThirdPartyNotices.txt" "$STAGE/$P4/THIRD_PARTY/onnxruntime-ThirdPartyNotices.txt"
 set_version "$STAGE/$P4/install.sh" "$ER_VERSION"
+# Plate Tools (decision 43): its own bundle (no runner, no ONNX Runtime, no models), its own version.
+P5="PlateTools-$PT_VERSION-linux-x86_64"
+mkdir -p "$STAGE/$P5"
+cp -R "$BUILD/PlateTools.ofx.bundle" "$STAGE/$P5/"
+cp "$SRC/packaging/install.sh" "$STAGE/$P5/"
+add_guide "$STAGE/$P5"
+set_version "$STAGE/$P5/install.sh" "$PT_VERSION"
 chmod a+rx "$STAGE/$P1/install.sh" "$STAGE/$P2/install.sh" "$STAGE/$P2/setup.sh" "$STAGE/$P3/install.sh" \
-  "$STAGE/$P4/install.sh" "$STAGE/$P4/setup.sh"
+  "$STAGE/$P4/install.sh" "$STAGE/$P4/setup.sh" "$STAGE/$P5/install.sh"
 
-for p in "$P1" "$P2" "$P3" "$P4"; do
+for p in "$P1" "$P2" "$P3" "$P4" "$P5"; do
   rm -f "$DIST/$p.tar.gz"
   tar -C "$STAGE" --owner=0 --group=0 -czf "$DIST/$p.tar.gz" "$p"
 done
-(cd "$DIST" && sha256sum "$P1.tar.gz" "$P2.tar.gz" "$P3.tar.gz" "$P4.tar.gz" >SHA256SUMS)
+(cd "$DIST" && sha256sum "$P1.tar.gz" "$P2.tar.gz" "$P3.tar.gz" "$P4.tar.gz" "$P5.tar.gz" >SHA256SUMS)
 echo
 echo "Packages in $DIST:"
-(cd "$DIST" && ls -l "$P1.tar.gz" "$P2.tar.gz" "$P3.tar.gz" "$P4.tar.gz" SHA256SUMS && cat SHA256SUMS)
+(cd "$DIST" && ls -l "$P1.tar.gz" "$P2.tar.gz" "$P3.tar.gz" "$P4.tar.gz" "$P5.tar.gz" SHA256SUMS && cat SHA256SUMS)
 echo "Unpacked: $(du -sh "$STAGE/$P1" | cut -f1) (Matte Refine), $(du -sh "$STAGE/$P2" | cut -f1) (Matte Refine ML)," \
-  "$(du -sh "$STAGE/$P3" | cut -f1) (Matte Merge), $(du -sh "$STAGE/$P4" | cut -f1) (Edge Recipes)"
+  "$(du -sh "$STAGE/$P3" | cut -f1) (Matte Merge), $(du -sh "$STAGE/$P4" | cut -f1) (Edge Recipes), $(du -sh "$STAGE/$P5" | cut -f1) (Plate Tools)"
