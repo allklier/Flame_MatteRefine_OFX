@@ -2,7 +2,7 @@
 # Matte Refine for Flame: install or uninstall the plugins.
 #   sudo ./install.sh                          install every bundle next to this script
 #                                              (MatteRefine.ofx.bundle, MatteRefineML.ofx.bundle,
-#                                              MatteMerge.ofx.bundle, EdgeRecipes.ofx.bundle), replacing
+#                                              MatteMerge.ofx.bundle, EdgeRecipes.ofx.bundle, PlateTools.ofx.bundle), replacing
 #                                              an earlier version; other installed bundles are kept
 #   sudo ./install.sh --uninstall              remove the bundles this package ships (those next to it)
 #   sudo ./install.sh --plugins-dir DIR [...]  another plugin folder (tests, unusual layouts)
@@ -16,7 +16,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PLUGINS=/usr/OFX/Plugins
 [ "$(uname -s)" = Darwin ] && PLUGINS=/Library/OFX/Plugins  # where the Mac's OFX plugins live
-BUNDLES="MatteRefine.ofx.bundle MatteRefineML.ofx.bundle MatteMerge.ofx.bundle EdgeRecipes.ofx.bundle"
+BUNDLES="MatteRefine.ofx.bundle MatteRefineML.ofx.bundle MatteMerge.ofx.bundle EdgeRecipes.ofx.bundle PlateTools.ofx.bundle"
 VERSION=dev  # set by scripts/package_release.sh
 
 die() { echo "error: $*" >&2; exit 1; }
