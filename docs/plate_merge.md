@@ -1,7 +1,7 @@
 # Plate Merge (Plate Tools bundle) — design, behaviour, tests, limits
 
-Written 2026-11-27. Status: PROTOTYPE. Core, plugin, unit tests and a host system test are built; nothing has been seen in
-Flame. Root decision 43 (PROPOSED until the maintainer approves the placement and the scope exception).
+Written 2026-11-27. Status: first release (Plate Tools 0.1.0). Core, plugin, unit tests and a host system test are built; the maintainer
+tried it in Flame on Linux and found the result correct. Not tried on macOS. Root decision 43 (accepted 2026-11-27).
 
 ## The problem
 Two plates of the same camera, aligned to within a pixel (< 1 px drift), from different takes. A person moves in each.

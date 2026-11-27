@@ -1,6 +1,6 @@
 # Matte Refine OFX for Flame
 
-OFX plugins for Autodesk Flame (Rocky Linux 9; Matte Refine and Matte Merge also on macOS, Apple Silicon) that refine an existing
+OFX plugins for Autodesk Flame (Rocky Linux 9; Matte Refine, Matte Merge and Plate Tools also on macOS, Apple Silicon) that refine an existing
 matte: they keep a good matte and fix its defects. Three nodes, all under *Matte Refine* in Batch:
 
 - **Matte Refine**: eight classical operations, real time. Each has its own column with an
@@ -10,7 +10,11 @@ matte: they keep a good matte and fix its defects. Three nodes, all under *Matte
 - **Matte Merge**: takes a matte with poor edge detail and a second matte with better detail (hair, fur) and
   merges the detail into the first, aligned to the picture. CPU only, real time (Rocky Linux and macOS).
 
-A fourth plugin, **Edge Recipes** (0.1.0, **experimental, source only: no package, not for use yet**), runs several of these
+**Plate Tools** (0.1.0) is a separate bundle for work on plates rather than mattes. Its first effect, **Plate Merge**, merges two aligned
+plates of the same camera (different takes, a person moving in each) using one tight matte per person, so that no pixel of the
+person in the lower plate peeks out from under the other. CPU only; Linux and macOS; user guide section 8.
+
+A further plugin, **Edge Recipes** (0.1.0, **experimental, source only: no package, not for use yet**), runs several of these
 methods in a fixed order for one common problem. The first recipe is **Hair Locks** (USERGUIDE.md, section 7).
 
 **How to use every operation, with before / after pictures: [USERGUIDE.md](USERGUIDE.md).**
@@ -61,6 +65,8 @@ Five packages; each installs on its own:
 | `MatteRefine-<version>-linux-x86_64.tar.gz` | Rocky Linux 9 | Matte Refine (classical clean-up and edge operations) |
 | `MatteRefineML-<version>-linux-x86_64.tar.gz` | Rocky Linux 9, NVIDIA GPU | Matte Refine ML (machine-learning operations) |
 | `MatteMerge-<version>-linux-x86_64.tar.gz` | Rocky Linux 9 | Matte Merge (base matte + detail matte -> one matte) |
+| `PlateTools-<version>-linux-x86_64.tar.gz` | Rocky Linux 9 | Plate Tools (Plate Merge: two takes -> one plate) |
+| `PlateTools-<version>-macos-arm64.tar.gz` | macOS 15 or later, Apple Silicon | Plate Tools |
 | `MatteRefine-<version>-macos-arm64.tar.gz` | macOS 15 or later, Apple Silicon | Matte Refine |
 | `MatteMerge-<version>-macos-arm64.tar.gz` | macOS 15 or later, Apple Silicon | Matte Merge |
 

@@ -59,7 +59,7 @@ support", "Synthetic mattes"): grep the three files for the title.
 | 40 | Jump Repair (ML plugin): removes 1-3 frame matte jumps, local and deterministic | root |
 | 42 | scope filter: build for COMMON problems where manual roto is costly; leave rare edge cases to manual roto | root |
 | 41 | fourth plugin "Edge Recipes": modular functions inside one plugin, a planner orders them per recipe, shared evidence | root |
-| 43 | Plate Tools bundle, first effect Plate Merge (two aligned takes + two mattes -> one plate); scoped exception to 17 (PROPOSED) | root |
+| 43 | Plate Tools bundle, first effect Plate Merge (two aligned takes + two mattes -> one plate); scoped exception to 17 (ACCEPTED 2026-11-27, released as v0.6.0) | root |
 | 36 | ML feature plan: B2 as a model choice, slow behind a Quality switch, BiRefNet 24 GB rule, B3 before B4 | ml |
 | 35 | Matte Refine ML is a filter (picture on the front, matte in its alpha); supersedes 22 for ML only | ml |
 | 34 | ML picture colour = Auto (Flame converts to Rec.709 display) / Bypass; no colour maths in the plugin | ml |
