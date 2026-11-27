@@ -369,6 +369,11 @@ vendored copy) plus the two 1.5.1 colour headers (23, `VENDORED.txt`).
 
 ## Roadmap
 
+- **REMINDER (user, 2026-11-13): clean up the git history (rule 13).** The repo is public and older commits still hold
+  environment specifics (test machine names, mount paths, a few clip names in test sheets, the author address). Not done
+  yet, by choice. Plan when picked up: scan tree and history with `scripts/check_sensitive.sh --all` and a history grep,
+  scrub the tree with neutral role names, rewrite history on a COPY first (e.g. git filter-repo), then force-push and re-create
+  the tags and release assets (v0.4.0, v0.5.0, edge-recipes-v0.1.0). Ask the maintainer before the force-push.
 - Before a release package: the system test, `scripts/package_release.sh`, README for users.
 - **Analyze Frame** (DECIDED for plugin 1, user 2026-10-22; was PROPOSED). A
   button that analyses the current frame and sets the controls, with a popup saying what it
