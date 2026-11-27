@@ -28,7 +28,7 @@ Code comments cite sections by title ("Plugin 1 operations", "Flame host behavio
 support", "Synthetic mattes"): grep the three files for the title.
 
 **Decision index** (numbers are stable; in `ofx/CLAUDE.md`: 4, 5, 6, 11, 13, 22, 23, 24, 25; in
-`ofx/src/ops/CLAUDE.md`: 7-10, 12, 15, 16, 20, 21, 26; in `ofx/ml/CLAUDE.md`: 29-36; in this file: 1, 2, 3, 14, 17, 18, 19, 27, 28, 37, 38):
+`ofx/src/ops/CLAUDE.md`: 7-10, 12, 15, 16, 20, 21, 26; in `ofx/ml/CLAUDE.md`: 29-36; in this file: 1, 2, 3, 14, 17, 18, 19, 27, 28, 37, 38, 43):
 
 | # | Decision | In |
 |---|---|---|
@@ -59,6 +59,7 @@ support", "Synthetic mattes"): grep the three files for the title.
 | 40 | Jump Repair (ML plugin): removes 1-3 frame matte jumps, local and deterministic | root |
 | 42 | scope filter: build for COMMON problems where manual roto is costly; leave rare edge cases to manual roto | root |
 | 41 | fourth plugin "Edge Recipes": modular functions inside one plugin, a planner orders them per recipe, shared evidence | root |
+| 43 | Plate Tools bundle, first effect Plate Merge (two aligned takes + two mattes -> one plate); scoped exception to 17 (PROPOSED) | root |
 | 36 | ML feature plan: B2 as a model choice, slow behind a Quality switch, BiRefNet 24 GB rule, B3 before B4 | ml |
 | 35 | Matte Refine ML is a filter (picture on the front, matte in its alpha); supersedes 22 for ML only | ml |
 | 34 | ML picture colour = Auto (Flame converts to Rec.709 display) / Bypass; no colour maths in the plugin | ml |
@@ -327,6 +328,17 @@ vendored copy) plus the two 1.5.1 colour headers (23, `VENDORED.txt`).
   matte creeping over an ear for 3+ frames of a head turn: not built, roto an exclusion shape in Flame; no "exclude region" mode,
   no flow-anchored edge limit). Counter-example that passes the filter: thin hair locks over all frames (complex shifting
   shape, needed on every frame): decision 39. Apply this test before starting any new operation or recipe step.
+- **43. PROPOSED (2026-11-27, prototype on branch plate_merge; maintainer to approve): Plate Tools, a fifth bundle, first
+  effect "Plate Merge".** Two aligned plates of the same camera (different takes, < 1 px drift), each with a tight matte of
+  its person, in; one merged plate out: B Over A (B through the union of both grown mattes, split screen) or Clean
+  Background (each person replaced from the other take; both = residual), a ring-referenced per-channel log-gain match of B
+  to A, a Keep A protect mask, plate A bit for bit where the swap is 0. Why not plugins 1-3: they are one picture + mattes ->
+  a matte (Merge is atomic by design, 37); this takes two pictures and outputs a picture. Why a bundle with one factory per
+  effect (41's verified pattern): further two-plate / clean-plate effects join it without a new install. Scope: an
+  EXCEPTION to 17 (no matte is made or changed, but the node composites pictures, beyond matte refinement); passes 42
+  (recurring, costly by hand). CMake `MR_BUILD_PLATE` (default OFF, needs `MR_BUILD_MERGE`), id `com.janklier.platemerge`,
+  `PT_VERSION` 0.1.0. Design, numbers, limits and the UNVERIFIED Flame items (socket layout of a non-mask RGBA clip, the
+  colour conversion once a second clip is connected): `docs/plate_merge.md`; Flame sheet `ofx/plate/package/PLATE_MERGE_TEST.txt`.
 - **19. DECIDED (user, 2026-10-22): UI = one node, two tabs, one operation per column.** An op =
   Enable + at most 4 controls, off by default; paired ops share a column. Tab 1 "Fill & Core":
   Matte (View, Version) · Clean & Crush · Fill Holes · Fill Holes Edges · Solid Core · Support

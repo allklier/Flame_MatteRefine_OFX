@@ -1,0 +1,53 @@
+FLAME TEST FOR PLATE MERGE 0.1.0 (Plate Tools bundle, prototype)
+==================================================================
+Written 2026-11-27. About 30 minutes. Nothing here has been seen in Flame yet: every item is a first look.
+Design: docs/plate_merge.md (root decision 43).
+
+WHAT THIS TESTS
+  Plate Merge: two aligned plates of the same camera (different takes), each with a matte of the person in it,
+  merged into one plate: B Over A (split screen, B's person on top) or Clean Background (both persons removed).
+  Checked here: the sockets (the main unknown), the footers, colour, each View and control, proxy, speed.
+
+SETUP (assistant builds on the Rocky 9 build machine; you do the sudo + restart)
+  1. sudo ln -s <build folder>/PlateTools.ofx.bundle /usr/OFX/Plugins/   (the assistant gives the folder). Restart Flame.
+  2. The node is "Plate Merge" (group "Matte Refine"). One tab, three columns:
+       Plate Merge (View, Matte Out, Version) · Merge (Mode, Grow px, Feather px, Level Match) ·
+       Support (Debug Logging, Collect Logs)
+     Note if Flame lays it out differently (cut labels, doubles shown as whole numbers, an extra column).
+  3. Debug Logging on: one DEBUG line per render in ~/.cache/matte-refine/logs/matte-refine.log ("node=pm:<id>").
+
+FOOTAGE (synthetic or cleared stock only for the first look; no client plates in screenshots or logs sent out)
+  A = plate A, mA = matte of the person in A;  B = plate B (same camera, aligned), mB = matte of the person in B.
+  K = optional: a roto over something in A that must stay (e.g. a reflection in a window).
+  Scene-linear plates (e.g. ACEScg) for Level Match.
+
+CONNECT
+  A -> front (red), mA -> its matte (blue, source alpha). Then look at the remaining sockets and WRITE DOWN what Flame
+  shows: expected a green "Plate B" socket with its own blue matte socket, then a blue "Keep A" socket.
+  B -> Plate B's front, mB -> Plate B's matte, K -> Keep A (later).
+
+TESTS
+  1. Version label "0.1.0 (<git>)"; log has "==== Plate Tools 0.1.0 (<git>) load (describe): Plate Merge ====".
+  2. Sockets: count, colours, labels, order. Does mB arrive? (View Swap Matte must show B's person in white; if only
+     A's person shows, B's matte does not arrive in Plate B's alpha: note it, it decides the socket design.)
+  3. Footers, one at a time:
+     a. A only, no matte: "Plate A's matte is missing ..." Output = A, alpha 0.
+     b. A + mA, no B: "Connect plate B ..." Output = A.
+     c. B without mB: "Plate B's matte is missing ...".
+     d. Everything: "Level Match: B +x.xx +x.xx +x.xx stops (R G B). Residual (both persons): N px."
+  4. COLOUR (important): View Result. Where neither matte is on, the output must equal plate A exactly: A/B the node
+     output against A (or a difference blend: black). Note the output's colourspace tag, and whether the picture looks
+     converted (brighter / different curve) once Plate B is connected. Repeat with View Plate A.
+  5. Mode B Over A: B's person on top, no trace of A's person (step through frames where they cross). Mode Clean
+     Background: both persons gone except where they overlap (View Residual shows those pixels).
+  6. Grow px: raise until A's soft shadow / halo is gone. Feather px: 0 shows a hard seam, the default a soft one.
+  7. Level Match off / on: with plates of slightly different exposure, the seam should disappear with it on. View Ring
+     shows the pixels it compares; View Plate B Matched shows B after the match.
+  8. Keep A: connect K over a region the swap would replace (e.g. a reflection near A's person): A must stay there.
+  9. Matte Out Residual: the alpha carries the residual instead of the swap matte.
+  10. Proxy / render scale: the result should look the same at proxy (Grow and Feather scale).
+  11. Speed at UHD (log "render ... ms"); Batch Render of a few frames.
+  12. Collect Logs writes ~/matte-refine-support-<time>.tar.gz.
+
+REPORT
+  Sockets as seen (2), colour result (4), anything that looks wrong, and the DEBUG line of one frame.

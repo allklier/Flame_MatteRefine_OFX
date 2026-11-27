@@ -15,6 +15,7 @@ anything else, and fixes its defects. It does not pull a new matte from the pict
 5. [Which operation do I need?](#5-which-operation-do-i-need)
 6. [Matte Merge: combining two mattes](#6-matte-merge-combining-two-mattes)
 7. [Edge Recipes: Hair Locks](#7-edge-recipes-hair-locks)
+8. [Plate Merge: two takes into one plate (prototype)](#8-plate-merge-two-takes-into-one-plate-prototype)
 
 About the pictures: every before / after image in this guide was made from the synthetic test
 scenes (section 4) with the plugins' own code. The settings are given under each image. Mattes
@@ -962,3 +963,31 @@ Rebuild Detail added) and **Trimap** (what the model was given).
 
 **Analyze** (as Matte Refine's Analyze Frame, setting the controls from the frames you analyse) is planned for Hair Locks; it
 is not in this version.
+
+---
+
+## 8. Plate Merge: two takes into one plate (prototype)
+
+**Plate Merge** (bundle Plate Tools, group Matte Refine; a prototype, not yet tried in Flame) merges two plates of the same
+camera from different takes, each with a person who moves: the typical split screen. Plate A is the lower plate, plate B
+the upper. **B Over A** puts B's person on top and replaces A's person with B's clean background, so A's person never
+peeks out from under B's. **Clean Background** removes both persons wherever the other take is clean. The plates must be
+aligned (stabilised or locked off; under about 1 px of drift) and should be scene-linear (e.g. ACEScg).
+
+**Connect:** plate A to the front socket and the matte of A's person to its matte socket; plate B with the matte of B's
+person to the Plate B sockets; optionally a roto to **Keep A** for anything plate A must keep where the swap would replace
+it, such as a window reflection of another actor or a shadow you want from take A. The image output is the merged plate;
+the matte output is the **Swap Matte** (where plate B was taken, for a comp in Batch) or, with **Matte Out** Residual, the
+pixels where both persons are and neither take has a clean background.
+
+**Mattes: tight, then grow.** Give the node tight mattes of the persons (LTX Alpha Gen, cleaned in Matte Refine if needed)
+and let **Grow px** reach past what the matte misses: soft shadows, defocus and motion-blur halos, a faint glow. Raise Grow
+until no trace of A's person is left at the edge; **Feather px** then softens the seam. A faint haze in a matte (below 2 %)
+is ignored. Shadows and reflections of a person that fall far from the person (a long shadow on the floor, a reflection in
+a window) are not covered by Grow: add them to the matte, or, when they must stay, protect them with Keep A.
+
+**Level Match** (on) matches plate B's level and colour to plate A on a ring of clean pixels around the swap, so a small
+exposure or light difference between the takes leaves no seam. View **Ring** shows the pixels it compares and **Plate B
+Matched** the corrected plate B; the footer gives the correction in stops. Turn it off for log or video-encoded plates.
+Outside the swap the output is plate A, bit for bit.
+
