@@ -3,13 +3,14 @@
 #   HOST=<ssh host> REMOTE=<folder on the Mac> [CMAKE=<cmake on the Mac>] [CMAKE_ARGS=...] [DIST=<local folder>] \
 #     scripts/package_release_mac.sh
 # Syncs the source (docs included) to REMOTE/release_src, configures a clean REMOTE/release_build (Release,
-# MR_BUILD_MERGE=ON; never REMOTE/build, which serves the dev symlinks), builds, runs ctest, checks the
+# MR_BUILD_MERGE=ON, MR_BUILD_PLATE=ON; never REMOTE/build, which serves the dev symlinks), builds, runs ctest, checks the
 # bundles (arm64 only, minos 15.0, only system libraries, no build paths), stages in a private temporary
 # folder on the Mac's own disk (the SMB build share ignores chmod: everything would be 0700), writes into
 # REMOTE/release_build/dist, then copies to DIST (default dist/):
 #   MatteRefine-<MR_VERSION>-macos-arm64.tar.gz   Matte Refine (plugin 1), install.sh, docs
 #   MatteMerge-<MM_VERSION>-macos-arm64.tar.gz    Matte Merge (plugin 3), install.sh, docs
-#   SHA256SUMS (on the Mac these two; in DIST merged with the lines already there)
+#   PlateTools-<PT_VERSION>-macos-arm64.tar.gz    Plate Tools (Plate Merge), install.sh, docs
+#   SHA256SUMS (on the Mac these three; in DIST merged with the lines already there)
 # Matte Refine ML is Linux only (decision 33). Not codesigned or notarised (only the linker's ad-hoc
 # signature): install.sh removes the quarantine flag. Writes only under REMOTE and the temporary staging
 # folder (removed on exit); never installs into /Library/OFX.
@@ -60,11 +61,12 @@ export COPYFILE_DISABLE=1  # no AppleDouble ._ files in cp / tar (the build area
 
 MR_VERSION="$(sed -n 's/^set(MR_VERSION "\(.*\)")$/\1/p' "$SRC/CMakeLists.txt")"
 MM_VERSION="$(sed -n 's/^set(MM_VERSION "\(.*\)")$/\1/p' "$SRC/ofx/merge/CMakeLists.txt")"
-[ -n "$MR_VERSION" ] && [ -n "$MM_VERSION" ] || { echo "error: versions not found in the CMake files" >&2; exit 1; }
-echo "Matte Refine $MR_VERSION, Matte Merge $MM_VERSION, build $GIT, macOS $(sw_vers -productVersion)"
+PT_VERSION="$(sed -n 's/^set(PT_VERSION "\(.*\)")$/\1/p' "$SRC/ofx/plate/CMakeLists.txt")"
+[ -n "$MR_VERSION" ] && [ -n "$MM_VERSION" ] && [ -n "$PT_VERSION" ] || { echo "error: versions not found in the CMake files" >&2; exit 1; }
+echo "Matte Refine $MR_VERSION, Matte Merge $MM_VERSION, Plate Tools $PT_VERSION, build $GIT, macOS $(sw_vers -productVersion)"
 
 rm -rf "$BUILD"
-"$CMAKE" -S "$SRC" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release -DMR_BUILD_MERGE=ON -DMR_GIT="$GIT" "$@" >/dev/null
+"$CMAKE" -S "$SRC" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release -DMR_BUILD_MERGE=ON -DMR_BUILD_PLATE=ON -DMR_GIT="$GIT" "$@" >/dev/null
 "$CMAKE" --build "$BUILD" -j 8 >"$BUILD/build.log" 2>&1 || { tail -40 "$BUILD/build.log"; exit 1; }
 grep -E 'warning' "$BUILD/build.log" || true
 (cd "$BUILD" && "$CTEST" --output-on-failure)
@@ -88,6 +90,7 @@ check_bin() {
 }
 check_bin "$BUILD/MatteRefine.ofx.bundle/Contents/MacOS/MatteRefine.ofx"
 check_bin "$BUILD/MatteMerge.ofx.bundle/Contents/MacOS/MatteMerge.ofx"
+check_bin "$BUILD/PlateTools.ofx.bundle/Contents/MacOS/PlateTools.ofx"
 
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
@@ -118,8 +121,10 @@ stage() {  # <package name> <bundle name> <version>
 P1="MatteRefine-$MR_VERSION-macos-arm64"
 P3="MatteMerge-$MM_VERSION-macos-arm64"
 stage "$P1" MatteRefine "$MR_VERSION"
+P5="PlateTools-$PT_VERSION-macos-arm64"
 stage "$P3" MatteMerge "$MM_VERSION"
-(cd "$DIST" && shasum -a 256 "$P1.tar.gz" "$P3.tar.gz" >SHA256SUMS)
+stage "$P5" PlateTools "$PT_VERSION"
+(cd "$DIST" && shasum -a 256 "$P1.tar.gz" "$P3.tar.gz" "$P5.tar.gz" >SHA256SUMS)
 echo
 echo "Packages in $DIST:"
-(cd "$DIST" && ls -l "$P1.tar.gz" "$P3.tar.gz" SHA256SUMS && cat SHA256SUMS)
+(cd "$DIST" && ls -l "$P1.tar.gz" "$P3.tar.gz" "$P5.tar.gz" SHA256SUMS && cat SHA256SUMS)
